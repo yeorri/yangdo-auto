@@ -1,0 +1,7 @@
+playwright>=1.40
+pytesseract>=0.3.10
+Pillow>=10.0
+pywinauto>=0.6.8
+pywin32>=306
+openpyxl>=3.1
+pypdf>=4.0
