@@ -54,7 +54,7 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     if popup is None:
         res.reason = "조회/첨부 팝업 열기 실패"
         return res
-    ok = await H.attach_files_and_submit(popup, files, log, auto_submit=inp.auto_submit)
+    ok = await H.attach_files_and_submit(popup, files, log, auto_submit=inp.auto_submit, parent=page)
     try:
         if not popup.is_closed():
             await popup.close()

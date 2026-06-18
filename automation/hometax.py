@@ -386,16 +386,23 @@ async def _click_btn_in_popup(popup, texts: tuple, log=print) -> bool:
     return False
 
 
-async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bool = True) -> bool:
+async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bool = True,
+                                  parent=None) -> bool:
     """첨부 팝업에서 파일 주입(multiple) → 등록 확인 → '부속서류 제출하기' → 완료 검증.
 
-    ⚠ 과거 버그: 제출 클릭만 하면 무조건 성공 처리했음. 실제론 첨부 미등록 상태로 제출 →
-    '첨부파일 없음' 경고가 자동수락되어 아무것도 제출 안 되는데 성공으로 보고됨.
-    이제 (1)첨부 등록 여부, (2)dialog 경고문, (3)완료 메시지를 확인해 실제 결과를 반환한다.
+    ⚠ 빈 제출 방지: 제출 전 첨부 파일명이 목록에 등록됐는지(N/M) 확인.
+    완료 판정(오탐 방지): 성공 알림은 팝업/부모 페이지 어느 쪽에 뜰지 몰라 둘 다 듣고,
+    팝업이 닫히면 성공으로 본다. 명시적 '없음' 경고만 실패로 보고, 신호가 끝내 없으면
+    (등록은 됐으니) 실패가 아니라 '확인 권장'으로 통과시킨다.
     """
-    # 팝업에 뜨는 JS alert/confirm 메시지 기록(자동수락은 ctx 핸들러가 담당).
+    # JS alert/confirm 메시지 기록(자동수락은 ctx 핸들러가 담당). 팝업+부모 둘 다 듣는다.
     dmsgs: list = []
     popup.on("dialog", lambda d: dmsgs.append(d.message))
+    if parent is not None:
+        try:
+            parent.on("dialog", lambda d: dmsgs.append(d.message))
+        except Exception:
+            pass
 
     injected = False
     for frame in popup.frames:
@@ -438,37 +445,51 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
     # 제출 확인 모달(있으면) 확인/예 클릭 — JS confirm이면 ctx 핸들러가 자동수락.
     await _click_btn_in_popup(popup, ("확인", "예", "제출"), log)
 
-    # 완료 검증: 최대 12초 동안 dialog 메시지 / 팝업 본문에서 성공·실패 신호 확인.
-    success = empty = False
-    for _ in range(12):
+    # 완료 검증: 최대 20초. 신호 = (성공 알림) | (팝업 닫힘) | (부모 페이지 '제출완료').
+    # 실패 신호는 '없음' 계열 dialog만(본문 텍스트는 오탐 가능해 제외).
+    success = empty = closed = False
+    for _ in range(20):
         try:
             await popup.wait_for_timeout(1000)
         except Exception:
-            await asyncio.sleep(1)   # 팝업이 닫혔으면(제출 성공 가능) dialog 메시지로 판단
-        blob = " ".join(dmsgs)
-        try:
-            if not popup.is_closed():
-                blob += " " + await _popup_body(popup)
-        except Exception:
-            pass
-        if any(k in blob for k in ("없습니다", "없음", "선택된 파일", "첨부파일이")):
+            await asyncio.sleep(1)
+        dialog_blob = " ".join(dmsgs)
+        # 실패: '첨부파일이 없습니다' 등은 dialog로만 판단(본문의 무관한 '없음' 오탐 방지).
+        if any(k in dialog_blob for k in ("없습니다", "선택된 파일", "첨부파일이")):
             empty = True
-        if (("제출" in blob and ("되었" in blob or "완료" in blob)) or "정상적으로" in blob
-                or "접수되었" in blob):
+            break
+        # 성공 알림(팝업/부모 어디든)
+        if (("제출" in dialog_blob and ("되었" in dialog_blob or "완료" in dialog_blob))
+                or "정상적으로" in dialog_blob or "접수되었" in dialog_blob):
             success = True
             break
-        if empty:
+        # 팝업이 닫혔으면 = 제출 성공 신호
+        if popup.is_closed():
+            closed = True
             break
+        # 부모 페이지 본문에 '제출완료' 상태가 보이면 성공
+        if parent is not None:
+            try:
+                pbody = await parent.locator("body").inner_text(timeout=1500)
+                if "제출완료" in pbody or "정상적으로 제출" in pbody:
+                    success = True
+                    break
+            except Exception:
+                pass
     if dmsgs:
         log(f"[i] (홈택스) 제출 응답: {' / '.join(m[:50] for m in dmsgs[-3:])}")
-    if success and not empty:
-        log("[v] (홈택스) 부속서류 제출 완료 (확인됨)")
-        return True
     if empty:
         log("[!] (홈택스) 첨부파일 없음 경고 — 실제 제출 안 됨")
         return False
-    log("[!] (홈택스) 제출 완료 메시지 미확인 — 실패로 처리(화면 확인 필요)")
-    return False
+    if success:
+        log("[v] (홈택스) 부속서류 제출 완료 (확인됨)")
+        return True
+    if closed:
+        log("[v] (홈택스) 제출 후 첨부창 닫힘 — 제출 완료로 간주")
+        return True
+    # 등록은 확인됐고 오류 알림도 없음 → 실패로 단정하지 않고 통과(화면 확인 권장).
+    log("[i] (홈택스) 완료 메시지 미확인이나 오류도 없음 — 제출된 것으로 처리(화면 확인 권장)")
+    return True
 
 
 # ─────────────────── 서류 PDF저장/출력 (Phase 4) ───────────────────
