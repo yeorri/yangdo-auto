@@ -1,0 +1,5 @@
+{
+  "version": "1.0.0",
+  "download_url": "https://github.com/yeorri/yangdo-auto/releases/latest",
+  "notes": "첫 릴리즈. 7단계 자동화(위택스·홈택스 신고 → 부속서류 → 접수증·신고서 출력 → 납부서 출력), 접수증·신고서 PDF 병합, 위택스 가상계좌 대기. Chromium은 첫 실행 때 1회 자동 다운로드."
+}

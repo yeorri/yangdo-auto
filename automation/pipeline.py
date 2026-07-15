@@ -101,9 +101,17 @@ async def run_pipeline(selected_keys: list[str], inp: Inputs, emit: Emit,
         log("[!] 실행할 phase가 없습니다.")
         return []
 
-    # PDF 저장 모드면 launch 전에 기본 프린터를 'Microsoft Print to PDF'로 박음
+    # 인쇄 대상(sticky)은 모드에 맞게 launch 전에 항상 명시 —
+    # PDF 모드가 남긴 'Microsoft Print to PDF'가 출력 모드에 이월되는 버그 방지.
     if inp.output_mode == "pdf":
         B.ensure_pdf_sticky_settings()
+    else:
+        prn = B.default_printer_name()
+        if prn:
+            B.ensure_sticky_printer(prn)
+            log(f"[i] 인쇄 대상: 기본 프린터 '{prn}'")
+        else:
+            log("[!] 기본 프린터 조회 실패 — 이전 인쇄 대상이 그대로 사용될 수 있음")
     if inp.output_dir:
         Path(inp.output_dir).mkdir(parents=True, exist_ok=True)
 

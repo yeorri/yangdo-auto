@@ -62,9 +62,13 @@ async def launch(pw) -> BrowserContext:
     )
 
 
-def ensure_pdf_sticky_settings(profile_dir: Path = PROFILE_DIR) -> bool:
-    """Chrome Preferences에 'Microsoft Print to PDF'를 기본 프린터로 박는다.
+def ensure_sticky_printer(printer: str, profile_dir: Path = PROFILE_DIR) -> bool:
+    """Chrome Preferences의 인쇄 대상(sticky)을 printer로 박는다.
 
+    --kiosk-printing은 OS 기본 프린터가 아니라 이 sticky 값으로 인쇄한다 →
+    PDF 모드가 남긴 'Microsoft Print to PDF'가 출력(인쇄) 모드에서도 그대로 쓰여
+    종이 대신 저장 다이얼로그가 뜨는 버그를 막으려면, 모드에 맞는 대상을
+    launch 전에 항상 명시해야 한다.
     ⚠ Chromium 실행 중에 고치면 종료 시 덮어써짐 → 반드시 launch 전에 호출.
     reference/AUTOMATION_PATTERNS.md 3절.
     """
@@ -76,11 +80,11 @@ def ensure_pdf_sticky_settings(profile_dir: Path = PROFILE_DIR) -> bool:
     sticky = {
         "version": 2,
         "recentDestinations": [{
-            "id": "Microsoft Print to PDF", "origin": "local", "account": "",
-            "capabilities": "", "displayName": "Microsoft Print to PDF",
+            "id": printer, "origin": "local", "account": "",
+            "capabilities": "", "displayName": printer,
             "extensionId": "", "extensionName": "", "icon": "",
         }],
-        "selectedDestinationId": "Microsoft Print to PDF",
+        "selectedDestinationId": printer,
     }
     prefs.setdefault("printing", {}).setdefault("print_preview_sticky_settings", {})
     prefs["printing"]["print_preview_sticky_settings"]["appState"] = json.dumps(sticky)
@@ -90,6 +94,20 @@ def ensure_pdf_sticky_settings(profile_dir: Path = PROFILE_DIR) -> bool:
         return True
     except Exception:
         return False
+
+
+def ensure_pdf_sticky_settings(profile_dir: Path = PROFILE_DIR) -> bool:
+    """PDF 저장 모드용 — 인쇄 대상을 'Microsoft Print to PDF'로."""
+    return ensure_sticky_printer("Microsoft Print to PDF", profile_dir)
+
+
+def default_printer_name() -> str:
+    """Windows 기본 프린터 이름. 실패 시 ''."""
+    try:
+        import win32print
+        return win32print.GetDefaultPrinter() or ""
+    except Exception:
+        return ""
 
 
 def attach_dialog_handler(page: Page, msgs: list) -> None:

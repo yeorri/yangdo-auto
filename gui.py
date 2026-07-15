@@ -11,11 +11,22 @@ from __future__ import annotations
 import os
 import sys
 
-# 배포(frozen exe)면 동봉된 Chromium을 Playwright가 쓰도록 — 어떤 playwright import보다 먼저.
+# 배포(frozen exe)에서 Chromium 위치 결정 — 어떤 playwright import보다 먼저.
+# 동봉 폴더가 있으면 그걸 쓰고(구버전 풀번들 하위호환), 없으면 Playwright 기본 위치
+# (%LOCALAPPDATA%\ms-playwright)를 사용 — 첫 실행 때 browser_setup이 자동 설치한다.
 if getattr(sys, "frozen", False):
     _base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH",
-                          os.path.join(_base, "playwright-browsers"))
+    _bundled = os.path.join(_base, "playwright-browsers")
+    if os.path.isdir(_bundled):
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _bundled)
+    else:
+        # ⚠ playwright-python은 frozen(exe)이면 드라이버에 PLAYWRIGHT_BROWSERS_PATH='0'
+        # (= exe 내부 .local-browsers)을 강제 주입한다(_transport.py) → 분리 배포에선
+        # 공용 위치(ms-playwright)를 명시해 선점해야 브라우저를 찾는다.
+        os.environ.setdefault(
+            "PLAYWRIGHT_BROWSERS_PATH",
+            os.path.join(os.environ.get("LOCALAPPDATA")
+                         or os.path.expanduser("~\\AppData\\Local"), "ms-playwright"))
 
 import asyncio
 import queue
@@ -24,6 +35,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import browser_setup
+import updater
 from automation import ALL_PHASES, Inputs, run_pipeline
 
 # ─────────────────────────── 디자인 토큰 ───────────────────────────
@@ -213,8 +226,52 @@ class App:
         self._phase_vars: dict[str, tk.BooleanVar] = {}
         self._phase_pills: dict[str, Pill] = {}
 
+        # 검증(_missing)이 참조하므로 _build_ui 전에 설정.
+        self._browsers_ready = browser_setup.browsers_ready()
         self._build_ui()
         self.root.after(100, self._poll)
+        updater.check_async(self._on_update_available)
+        if not self._browsers_ready:
+            self._install_browsers_async()
+
+    def _install_browsers_async(self):
+        """첫 실행: Chromium 자동 다운로드(~150MB). 완료까지 시작 버튼 비활성."""
+        self._append_log("[i] 첫 실행 준비 — 브라우저 구성요소(약 150MB)를 다운로드합니다. "
+                         "인터넷 연결이 필요하며 몇 분 걸릴 수 있습니다…")
+
+        def worker():
+            ok = browser_setup.install_browsers(
+                lambda m: self.events.put({"kind": "log", "text": m}))
+            # 완료 메시지도 같은 큐로 — 다운로드 로그와 순서가 어긋나지 않게(FIFO)
+            if ok:
+                self.events.put({"kind": "log",
+                                 "text": "[v] 브라우저 준비 완료 — 이제 시작할 수 있습니다."})
+
+            def fin():
+                self._browsers_ready = ok
+                self._refresh_validation()
+                if not ok:
+                    messagebox.showerror(
+                        "설치 실패",
+                        "브라우저 구성요소 다운로드에 실패했습니다.\n"
+                        "인터넷 연결을 확인한 뒤 프로그램을 다시 실행해주세요.")
+            self.root.after(0, fin)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_available(self, info: dict):
+        """새 버전 알림 — background thread에서 호출되므로 Tk 조작은 after로 디스패치."""
+        def ask():
+            msg = (f"새 버전 v{info['latest']}이 있습니다. (현재 v{info['current']})\n\n"
+                   + (f"{info['notes']}\n\n" if info.get("notes") else "")
+                   + "다운로드 페이지를 열까요?")
+            if messagebox.askyesno("업데이트 알림", msg):
+                import webbrowser
+                webbrowser.open(info["download_url"])
+        try:
+            self.root.after(0, ask)
+        except Exception:
+            pass
 
     # ── UI ──
     def _build_ui(self):
@@ -429,6 +486,8 @@ class App:
 
     def _missing(self) -> list[str]:
         """현재 선택/입력 기준 부족한 필수 항목 라벨 목록(없으면 빈 리스트)."""
+        if not self._browsers_ready:
+            return ["브라우저 구성요소 다운로드 완료 대기"]
         sel = {k for k, v in self._phase_vars.items() if v.get()}
         if not sel:
             return ["실행 단계 선택"]
