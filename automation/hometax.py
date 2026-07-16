@@ -425,13 +425,25 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
         log("[!] (홈택스) 첨부 팝업 file input 못 찾음")
         return False
     # 첨부 등록 확인: 파일명이 전부 목록에 보일 때까지 폴링(다건은 렌더가 늦음).
-    # ⚠ 긴 파일명은 목록에서 말줄임(…)으로 잘려 표시됨 → 앞 12자만 매칭(전체 매칭은
-    # 14개 다 올라갔는데 10/14로 오집계했음). 전부 보이면 즉시 진행, 최대 15초.
+    # ⚠ 목록의 표시 이름은 픽셀 폭 기준 말줄임(…)이라 파일마다 잘리는 위치가 다르고
+    # 공백도 달라질 수 있음 → 공백 제거 후 프리픽스를 12→10→8→6자로 줄여가며 매칭.
+    # (고정 12자 매칭은 10개 다 올라갔는데 9/10으로 오집계했음)
     names = [Path(f).name for f in files]
-    keys = [n[:12] for n in names]
+
+    def _norm(s: str) -> str:
+        return "".join(s.split())
+
+    keys = [_norm(n) for n in names]
 
     def _count(body: str) -> int:
-        return sum(1 for k in keys if k in body)
+        b = _norm(body)
+        found = 0
+        for k in keys:
+            for ln in (12, 10, 8, 6):
+                if k[:ln] in b:
+                    found += 1
+                    break
+        return found
 
     # 전부 보이면 즉시 진행. 일부가 끝내 매칭 안 되는 경우(말줄임이 12자보다 짧게
     # 잘리는 파일명 등)를 위해 '개수가 1.5초간 안 늘면' 등록 완료로 보고 진행 —
@@ -455,6 +467,13 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
             await popup.wait_for_timeout(1500)
             registered = _count(await _popup_body(popup))
     log(f"[i] (홈택스) 첨부 등록 확인: {registered}/{len(names)}개 (목록 표시 기준)")
+    if 0 < registered < len(names):
+        # 진단: 어떤 파일명이 목록에서 매칭 안 됐는지 — 오집계 원인 규명용.
+        b = _norm(await _popup_body(popup))
+        missing = [n for n, k in zip(names, keys)
+                   if not any(k[:ln] in b for ln in (12, 10, 8, 6))]
+        if missing:
+            log(f"[i] (홈택스) 목록에서 매칭 안 된 파일명: {missing}")
     if registered == 0:
         log("[!] (홈택스) 첨부 파일이 목록에 등록되지 않음 — 제출 중단(빈 제출 방지)")
         return False
