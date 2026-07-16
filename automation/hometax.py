@@ -419,12 +419,16 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
     if not injected:
         log("[!] (홈택스) 첨부 팝업 file input 못 찾음")
         return False
-    await popup.wait_for_timeout(2000)
-
-    # 첨부 등록 확인: 파일명이 목록에 보이는지. 안 보이면 '첨부/추가/등록' 버튼 시도 후 재확인.
+    # 첨부 등록 확인: 파일명이 전부 목록에 보일 때까지 폴링(다건은 렌더가 늦어
+    # 고정 2초로는 10/12처럼 덜 집계됨). 전부 보이면 즉시 진행, 최대 15초.
     names = [Path(f).name for f in files]
-    body = await _popup_body(popup)
-    registered = sum(1 for n in names if n in body)
+    registered = 0
+    for _ in range(30):
+        await popup.wait_for_timeout(500)
+        body = await _popup_body(popup)
+        registered = sum(1 for n in names if n in body)
+        if registered >= len(names):
+            break
     if registered == 0:
         if await _click_btn_in_popup(popup, ("첨부", "추가", "등록", "파일추가", "올리기"), log):
             await popup.wait_for_timeout(1500)
@@ -447,14 +451,19 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
     # 제출 확인 모달(있으면) 확인/예 클릭 — JS confirm이면 ctx 핸들러가 자동수락.
     await _click_btn_in_popup(popup, ("확인", "예", "제출"), log)
 
-    # 완료 검증: 최대 20초. 신호 = (성공 알림) | (팝업 닫힘) | (부모 페이지 '제출완료').
+    # 완료 검증: 신호 = (성공 알림) | (팝업 닫힘) | (부모 페이지 '제출완료').
+    # 실제 업로드는 제출 클릭 후 로딩바 창에서 진행됨 — 업로드가 보이는 동안은
+    # 계속 대기(quiet 리셋), 조용해진 뒤 25초까지만 추가 대기. 전체 한도 5분.
     # 실패 신호는 '없음' 계열 dialog만(본문 텍스트는 오탐 가능해 제외).
     success = empty = closed = False
-    for _ in range(20):
+    upload_seen = False
+    quiet = total = 0
+    while total < 300 and quiet < 25:
         try:
             await popup.wait_for_timeout(1000)
         except Exception:
             await asyncio.sleep(1)
+        total += 1
         dialog_blob = " ".join(dmsgs)
         # 실패: '첨부파일이 없습니다' 등은 dialog로만 판단(본문의 무관한 '없음' 오탐 방지).
         if any(k in dialog_blob for k in ("없습니다", "선택된 파일", "첨부파일이")):
@@ -469,6 +478,30 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
         if popup.is_closed():
             closed = True
             break
+        # 업로드 로딩바(progress 요소/'업로드 중' 문구)가 보이면 계속 대기
+        uploading = False
+        for fr in popup.frames:
+            try:
+                uploading = await fr.evaluate("""() => {
+                    const vis = el => { const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0; };
+                    for (const el of document.querySelectorAll(
+                            '[class*="progress"],[id*="progress"],[class*="loading"],[id*="loading"]'))
+                        if (vis(el)) return true;
+                    return /업로드\\s*중|전송\\s*중|송신\\s*중|처리\\s*중/.test(
+                        (document.body && document.body.innerText) || '');
+                }""")
+            except Exception:
+                continue
+            if uploading:
+                break
+        if uploading:
+            if not upload_seen:
+                log("[i] (홈택스) 첨부파일 업로드 진행 중 — 완료까지 대기…")
+                upload_seen = True
+            quiet = 0
+        else:
+            quiet += 1
         # 부모 페이지 본문에 '제출완료' 상태가 보이면 성공
         if parent is not None:
             try:
