@@ -217,6 +217,7 @@ async def _oz_print(oz, target, log=print, save: bool = True) -> bool:
         return True
     from pathlib import Path as _P
     _P(target).parent.mkdir(parents=True, exist_ok=True)
+    target = pdf_save.prepare_target(target, log)   # 사전 삭제 → 덮어쓰기창·OneDrive 잠금 회피
     ok, err = await asyncio.to_thread(pdf_save.fill_and_save, target, 25.0, log)
     if not ok:
         log(f"  [!] (위택스) PDF 저장 실패: {err}")

@@ -37,7 +37,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import browser_setup
 import updater
-from automation import ALL_PHASES, Inputs, run_pipeline
+from automation import ALL_PHASES, BrowserSession, Inputs, run_phases
 
 # ─────────────────────────── 디자인 토큰 ───────────────────────────
 FONT = "Malgun Gothic"        # 한글 선명
@@ -220,8 +220,10 @@ class App:
                         bordercolor=BG, arrowcolor=MUTE, relief="flat")
 
         self.events: queue.Queue = queue.Queue()
-        self.loop: asyncio.AbstractEventLoop | None = None
-        self.worker: threading.Thread | None = None
+        self.session_loop: asyncio.AbstractEventLoop | None = None
+        self.session: BrowserSession | None = None
+        self._run_fut = None   # 실행 중인 asyncio task — 중단 시 즉시 취소용
+        self._busy = False
         self._stop = False
         self._phase_vars: dict[str, tk.BooleanVar] = {}
         self._phase_pills: dict[str, Pill] = {}
@@ -229,10 +231,29 @@ class App:
         # 검증(_missing)이 참조하므로 _build_ui 전에 설정.
         self._browsers_ready = browser_setup.browsers_ready()
         self._build_ui()
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._poll)
         updater.check_async(self._on_update_available)
         if not self._browsers_ready:
             self._install_browsers_async()
+
+    def _ensure_session(self):
+        """세션 루프 스레드 + BrowserSession 준비(최초 1회)."""
+        if self.session_loop is not None:
+            return
+        self.session_loop = asyncio.new_event_loop()
+        threading.Thread(target=self.session_loop.run_forever, daemon=True).start()
+        self.session = BrowserSession()
+
+    def _on_close(self):
+        """창 닫기 — 세션 브라우저 정리 후 종료."""
+        try:
+            if self.session_loop is not None and self.session is not None:
+                fut = asyncio.run_coroutine_threadsafe(self.session.close(), self.session_loop)
+                fut.result(timeout=5)
+        except Exception:
+            pass
+        self.root.destroy()
 
     def _install_browsers_async(self):
         """첫 실행: Chromium 자동 다운로드(~150MB). 완료까지 시작 버튼 비활성."""
@@ -542,8 +563,8 @@ class App:
 
     # ── 실행 ──
     def _start(self):
-        if self.worker and self.worker.is_alive():
-            messagebox.showinfo("실행 중", "이미 진행 중입니다.")
+        if self._busy:
+            messagebox.showinfo("실행 중", "이미 진행 중입니다. 끝난 뒤 다시 시작하세요.")
             return
 
         selected = [k for k, v in self._phase_vars.items() if v.get()]
@@ -577,27 +598,26 @@ class App:
 
         async def main():
             try:
-                await run_pipeline(selected, inp, emit, stop_check=lambda: self._stop)
+                await run_phases(self.session, selected, inp, emit,
+                                 stop_check=lambda: self._stop)
+            except asyncio.CancelledError:
+                # 중단 버튼 = 즉시 취소. 화면이 어중간해도 phase는 시작 시 하드 리셋(goto)
+                # 하므로 다음 실행은 깨끗하게 시작된다. 브라우저는 유지.
+                emit("log", text="[i] 중단됨 — 즉시 종료 (브라우저 유지, 다음 실행 시 화면 자동 리셋)")
+                emit("done")
             except Exception as e:  # noqa: BLE001
                 emit("log", text=f"[!] 예외: {e}")
-            finally:
                 emit("done")
 
-        def thread_target():
-            self.loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.loop)
-            try:
-                self.loop.run_until_complete(main())
-            finally:
-                self.loop.close()
-
-        self.worker = threading.Thread(target=thread_target, daemon=True)
-        self.worker.start()
+        self._ensure_session()
+        self._busy = True
+        self._run_fut = asyncio.run_coroutine_threadsafe(main(), self.session_loop)
 
     def _stop_clicked(self):
         self._stop = True
-        self.status_var.set("중단 요청됨")
-        self.events.put({"kind": "log", "text": "[i] 중단 요청 — 현재 단계 후 멈춥니다."})
+        if self._run_fut is not None and not self._run_fut.done():
+            self._run_fut.cancel()   # 실행 중인 태스크 즉시 취소 (await 지점에서 끊김)
+        self.status_var.set("중단됨")
 
     # ── 큐 폴링 ──
     def _poll(self):
@@ -612,7 +632,8 @@ class App:
                 elif kind == "status":
                     self.status_var.set(evt.get("text", ""))
                 elif kind == "done":
-                    self.status_var.set("완료")
+                    self._busy = False
+                    self.status_var.set("완료 — 다음 건 입력 후 바로 시작 가능 (브라우저 유지)")
         except queue.Empty:
             pass
         self.root.after(100, self._poll)

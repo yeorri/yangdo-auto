@@ -42,7 +42,30 @@ def _send_with_timeout(hwnd: int, msg: int, wParam: int, lParam, timeout_ms: int
     return result.value
 
 
-def fill_and_save(target_path, timeout_sec: float = 30.0, log=None) -> tuple:
+def prepare_target(out_path, log=print):
+    """저장 대상 사전 정리 — 같은 이름 파일이 있으면 지우고 시작. (vat_data_auto 검증판)
+
+    덮어쓰기 확인 다이얼로그와 별개로, OneDrive 동기화가 파일을 잡고 있으면 덮어쓰기
+    자체가 실패해 Chrome '인쇄 실패'가 뜬다 — 미리 지우면 두 변수 모두 회피.
+    잠겨서 못 지우면 시각을 붙인 새 이름 반환.
+    """
+    out_path = Path(out_path)
+    if not out_path.exists():
+        return out_path
+    try:
+        out_path.unlink()
+        log(f"    기존 파일 삭제 후 재저장: {out_path.name}")
+        return out_path
+    except Exception:
+        from datetime import datetime
+        new = out_path.with_name(
+            f"{out_path.stem}_{datetime.now():%H%M%S}{out_path.suffix}")
+        log(f"    기존 파일 잠김 — 새 이름으로 저장: {new.name}")
+        return new
+
+
+def fill_and_save(target_path, timeout_sec: float = 30.0, log=None,
+                  overwrite_wait_sec: float = 0.5) -> tuple:
     """뜨는 저장 다이얼로그를 잡아 target_path로 저장(백그라운드). (성공, 에러메시지) 반환.
 
     ComboBoxEx32→ComboBox→Edit 모든 레이어에 WM_SETTEXT → WM_COMMAND IDOK
@@ -112,7 +135,9 @@ def fill_and_save(target_path, timeout_sec: float = 30.0, log=None) -> tuple:
         _log("    PDF: WM_COMMAND IDOK 전송")
 
         time.sleep(0.3)
-        _handle_overwrite_dialog(timeout_sec=5.0, log=_log)
+        # 덮어쓰기 확인창 감시 — prepare_target(사전 삭제)을 쓰면 뜰 일이 없으므로 짧게.
+        # (vat #11: 5초 고정 감시가 서류당 순수 낭비였음 → 파라미터화)
+        _handle_overwrite_dialog(timeout_sec=overwrite_wait_sec, log=_log)
 
         # 다이얼로그 닫힘 확인
         deadline = time.time() + 5

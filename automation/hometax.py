@@ -87,7 +87,9 @@ async def reset_to_home(page, log=print) -> None:
     """
     try:
         await page.goto(HOMETAX_URL, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(2000)
+        # 뒤따르는 메뉴 진입(_open_and_click_submenu)이 parent 가시성 대기(15s)를
+        # 따로 하므로 여기선 짧은 안정화만. (속도 최적화 — vat 패턴)
+        await page.wait_for_timeout(600)
     except Exception as e:
         log(f"[!] (홈택스) 홈 리셋 실패: {str(e)[:60]}")
 
@@ -658,6 +660,7 @@ async def _clipreport_print(scope, target, log=print, save: bool = True) -> bool
         await scope.wait_for_timeout(2500)
         return True
     target.parent.mkdir(parents=True, exist_ok=True)
+    target = pdf_save.prepare_target(target, log)   # 사전 삭제 → 덮어쓰기창·OneDrive 잠금 회피
     ok, err = await asyncio.to_thread(pdf_save.fill_and_save, target, 25.0, log)
     if not ok:
         log(f"  [!] (홈택스) PDF 저장 실패: {err}")
