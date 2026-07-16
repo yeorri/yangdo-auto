@@ -30,7 +30,16 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         res.reason = "부속서류 폴더 미지정/없음"
         log(f"[!] {res.reason}: {inp.attach_folder}")
         return res
-    files = [str(p) for p in sorted(folder.iterdir()) if p.is_file()]
+
+    # 자연 정렬(숫자 인식): 0,1,2,…,10,11 순. 문자열 정렬은 0,1,10,11,…,2 로 올라가
+    # 제출내역 순서가 뒤죽박죽이 됨.
+    import re as _re
+
+    def _natkey(p: Path):
+        return [int(t) if t.isdigit() else t.lower()
+                for t in _re.split(r"(\d+)", p.name)]
+
+    files = [str(p) for p in sorted(folder.iterdir(), key=_natkey) if p.is_file()]
     if not files:
         res.reason = "폴더에 첨부할 파일 없음"
         log(f"[!] {res.reason}")

@@ -80,33 +80,37 @@ async def inject_file(page, file_path: str, log=print) -> bool:
 
 
 async def _confirm_modals(page, log=print, rounds: int = 3) -> None:
-    """보이는 모달의 긍정 버튼(확인/예/제출) 클릭 (best-effort)."""
+    """보이는 모달의 긍정 버튼(확인/예/제출) 클릭 (best-effort).
+
+    프레임당 JS 한 번으로 탐색+클릭(요소별 await 왕복 제거 — 검증완료→제출 사이
+    수 초 걸리던 텀의 주범).
+    """
     for _ in range(rounds):
         clicked = False
         for frame in page.frames:
             try:
-                wins = frame.locator(".w2window, .modal, [role=dialog], .popup, .layer")
-                for i in range(await wins.count()):
-                    win = wins.nth(i)
-                    if not await win.is_visible():
-                        continue
-                    btns = win.locator("a, button, input[type=button], input[type=submit]")
-                    for b in range(await btns.count()):
-                        el = btns.nth(b)
-                        if not await el.is_visible():
-                            continue
-                        t = (await el.inner_text()).strip() or (await el.get_attribute("value") or "")
-                        if t.strip() in ("확인", "예", "제출"):
-                            await el.click()
-                            await page.wait_for_timeout(1000)
-                            clicked = True
-                            break
-                    if clicked:
-                        break
-                if clicked:
-                    break
+                clicked = await frame.evaluate("""() => {
+                    const vis = el => { const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0; };
+                    for (const win of document.querySelectorAll(
+                            '.w2window, .modal, [role=dialog], .popup, .layer')) {
+                        if (!vis(win)) continue;
+                        for (const el of win.querySelectorAll(
+                                'a, button, input[type=button], input[type=submit]')) {
+                            if (!vis(el)) continue;
+                            const t = ((el.innerText || el.value || '') + '').trim();
+                            if (t === '확인' || t === '예' || t === '제출') {
+                                el.click(); return true;
+                            }
+                        }
+                    }
+                    return false;
+                }""")
             except Exception:
                 continue
+            if clicked:
+                await page.wait_for_timeout(400)
+                break
         if not clicked:
             break
 
@@ -127,13 +131,14 @@ async def next_and_verify(page, log=print, timeout: int = 90) -> bool:
         except Exception as e:
             log(f"[!] (위택스) '다음' 클릭 실패: {str(e)[:60]}")
             return False
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(800)
     await _confirm_modals(page, log)
-    for sec in range(0, timeout, 2):
+    # 0.5초 간격 폴링 — 2초 간격은 완료 후 헛대기가 김
+    for i in range(timeout * 2):
         if "검증이 완료" in await _body(page):
-            log(f"[v] (위택스) 서식검증 완료 ({sec}s)")
+            log(f"[v] (위택스) 서식검증 완료 ({i // 2}s)")
             return True
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
     log("[!] (위택스) 서식검증 완료 미확인")
     return False
 
@@ -151,13 +156,13 @@ async def submit_filing(page, log=print, timeout: int = 40) -> bool:
         except Exception as e:
             log(f"[!] (위택스) '제출' 클릭 실패: {str(e)[:60]}")
             return False
-    await page.wait_for_timeout(1500)
+    await page.wait_for_timeout(600)
     await _confirm_modals(page, log)
-    for sec in range(0, timeout, 2):
+    for i in range(timeout * 2):
         if "정상적으로 완료" in await _body(page):
-            log(f"[v] (위택스) 제출 완료 ({sec}s)")
+            log(f"[v] (위택스) 제출 완료 ({i // 2}s)")
             return True
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
     log("[!] (위택스) '정상적으로 완료' 표시 미확인 — 화면 확인 필요")
     return clicked
 
@@ -205,13 +210,23 @@ async def _click_text_js(scope, text: str) -> bool:
 
 
 async def _oz_print(oz, target, log=print, save: bool = True) -> bool:
-    """OZ 뷰어: [인쇄] → 인쇄옵션 [확인] → (save면) Microsoft Print to PDF 저장."""
-    await oz.wait_for_timeout(1500)
-    if not await _click_text_js(oz, "인쇄"):
+    """OZ 뷰어: [인쇄] → 인쇄옵션 [확인] → (save면) Microsoft Print to PDF 저장.
+
+    고정 대기 대신 버튼 등장을 0.3초 간격 폴링 — 뷰어가 빨리 뜨면 그만큼 빨리 진행.
+    """
+    clicked = False
+    for _ in range(17):   # 최대 ~5초
+        if await _click_text_js(oz, "인쇄"):
+            clicked = True
+            break
+        await oz.wait_for_timeout(300)
+    if not clicked:
         log("  [!] (위택스) OZ 인쇄 버튼 못 찾음")
         return False
-    await oz.wait_for_timeout(1500)
-    await _click_text_js(oz, "확인")   # OZ 인쇄옵션 창의 확인 → 실제 인쇄
+    for _ in range(17):   # 인쇄옵션 창 [확인] 등장 폴링 (최대 ~5초)
+        if await _click_text_js(oz, "확인"):
+            break
+        await oz.wait_for_timeout(300)
     if not save:
         await oz.wait_for_timeout(2500)
         return True
@@ -290,7 +305,7 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
                     }
                 }""", has_y)
             oz = await info.value
-            await oz.wait_for_timeout(2500)
+            await oz.wait_for_timeout(500)   # _oz_print가 인쇄 버튼 등장을 폴링
             tgt = pdf_dir / fname
             if await _oz_print(oz, tgt, log, save=save):
                 result["saved"].append(fname)

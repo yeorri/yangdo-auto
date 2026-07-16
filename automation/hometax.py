@@ -207,30 +207,35 @@ async def verify_and_wait(page, log=print, timeout: int = 150) -> str:
 
 
 async def _click_modal_confirm(page, must_contain: str, log=print) -> bool:
-    """텍스트에 must_contain이 든 보이는 WebSquare 모달의 '확인'을 클릭."""
+    """텍스트에 must_contain이 든 보이는 WebSquare 모달의 '확인'을 클릭.
+
+    프레임당 JS 한 번으로 탐색+클릭(요소별 await 왕복 제거 — 수 초 → 수십 ms).
+    JS 클릭은 WebSquare 모달에서 검증된 방식(vat: '모달 내 전부 JS 클릭').
+    """
     for frame in page.frames:
         try:
-            wins = frame.locator(".w2window")
-            for i in range(await wins.count()):
-                win = wins.nth(i)
-                if not await win.is_visible():
-                    continue
-                txt = await win.inner_text()
-                if must_contain and must_contain not in txt:
-                    continue
-                btns = win.locator("a, button, input[type=button], input[type=submit]")
-                for b in range(await btns.count()):
-                    el = btns.nth(b)
-                    if not await el.is_visible():
-                        continue
-                    t = (await el.inner_text()).strip() or (await el.get_attribute("value") or "")
-                    if t.strip() == "확인":
-                        await el.click()
-                        log(f"[i] (홈택스) 모달 '확인' ({must_contain})")
-                        await page.wait_for_timeout(1000)
-                        return True
+            clicked = await frame.evaluate("""(mustContain) => {
+                const vis = el => { const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0; };
+                for (const win of document.querySelectorAll('.w2window')) {
+                    if (!vis(win)) continue;
+                    const txt = win.innerText || '';
+                    if (mustContain && !txt.includes(mustContain)) continue;
+                    for (const el of win.querySelectorAll(
+                            'a, button, input[type=button], input[type=submit]')) {
+                        if (!vis(el)) continue;
+                        const t = ((el.innerText || el.value || '') + '').trim();
+                        if (t === '확인') { el.click(); return true; }
+                    }
+                }
+                return false;
+            }""", must_contain)
         except Exception:
             continue
+        if clicked:
+            log(f"[i] (홈택스) 모달 '확인' ({must_contain})")
+            await page.wait_for_timeout(400)
+            return True
     return False
 
 
@@ -419,21 +424,25 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
     if not injected:
         log("[!] (홈택스) 첨부 팝업 file input 못 찾음")
         return False
-    # 첨부 등록 확인: 파일명이 전부 목록에 보일 때까지 폴링(다건은 렌더가 늦어
-    # 고정 2초로는 10/12처럼 덜 집계됨). 전부 보이면 즉시 진행, 최대 15초.
+    # 첨부 등록 확인: 파일명이 전부 목록에 보일 때까지 폴링(다건은 렌더가 늦음).
+    # ⚠ 긴 파일명은 목록에서 말줄임(…)으로 잘려 표시됨 → 앞 12자만 매칭(전체 매칭은
+    # 14개 다 올라갔는데 10/14로 오집계했음). 전부 보이면 즉시 진행, 최대 15초.
     names = [Path(f).name for f in files]
+    keys = [n[:12] for n in names]
+
+    def _count(body: str) -> int:
+        return sum(1 for k in keys if k in body)
+
     registered = 0
     for _ in range(30):
         await popup.wait_for_timeout(500)
-        body = await _popup_body(popup)
-        registered = sum(1 for n in names if n in body)
+        registered = _count(await _popup_body(popup))
         if registered >= len(names):
             break
     if registered == 0:
         if await _click_btn_in_popup(popup, ("첨부", "추가", "등록", "파일추가", "올리기"), log):
             await popup.wait_for_timeout(1500)
-            body = await _popup_body(popup)
-            registered = sum(1 for n in names if n in body)
+            registered = _count(await _popup_body(popup))
     log(f"[i] (홈택스) 첨부 등록 확인: {registered}/{len(names)}개 (목록 표시 기준)")
     if registered == 0:
         log("[!] (홈택스) 첨부 파일이 목록에 등록되지 않음 — 제출 중단(빈 제출 방지)")
@@ -653,17 +662,19 @@ async def _clipreport_scope(window):
     return None
 
 
-async def _clipreport_print(scope, target, log=print, save: bool = True) -> bool:
+async def _clipreport_print(scope, target, log=print, save: bool = True,
+                            expect_layer: bool | None = None) -> bool:
     """clipreport 인쇄 → (save=True) PDF 저장 / (save=False) 기본 프린터로 출력.
 
     데이터 로드 → printWindowView() → (인쇄방식 레이어가 뜨면 change 발화로 PDF DOM 초기화
     + mRe_printExportInfo) → save면 fill_and_save. 레이어 없으면(접수증) printWindowView가 곧 인쇄.
+    expect_layer: True=레이어 확실(신고서) / False=레이어 없음(접수증, 폴링 스킵) / None=모름(폴링).
     """
     try:
         await scope.wait_for_function(_CLIPREPORT_LOADED, timeout=30000)
     except Exception:
         log("  [!] (홈택스) clipreport 데이터 로드 대기 시간초과(계속)")
-    await scope.wait_for_timeout(500)
+    await scope.wait_for_timeout(300)
     key = await scope.evaluate("""() => {
         const m=window.m_reportHashMap; if(!m)return null;
         const k=Object.keys(m)[0]; if(!k)return null;
@@ -672,7 +683,13 @@ async def _clipreport_print(scope, target, log=print, save: bool = True) -> bool
     if not key or (isinstance(key, str) and key.startswith("__ERR__")):
         log(f"  [!] (홈택스) printWindowView 실패: {key}")
         return False
-    await scope.wait_for_timeout(1500)
+    # 인쇄방식 레이어 등장을 폴링(고정 1500ms 대신) — 접수증(expect_layer=False)은 스킵.
+    if expect_layer is not False:
+        try:
+            await scope.wait_for_function(
+                "() => !!document.querySelector('[id^=\"re_printType1\"]')", timeout=4000)
+        except Exception:
+            pass   # 레이어 없는 유형(접수증류) — 아래 evaluate가 null 반환
     # 인쇄방식 레이어(신고서)면: change 발화 → mRe_selectPrintRange(1) → mRe_printExportInfo
     layer_key = await scope.evaluate("""() => {
         const sel = document.querySelector('[id^="re_printType1"]');
@@ -717,10 +734,10 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
     # 접수증 (clipreport.do 최상위 창)
     report = next((p for p in ctx.pages if "clipreport" in (p.url or "")), None)
     if report:
-        await report.wait_for_timeout(1500)
+        await report.wait_for_timeout(400)   # _clipreport_print가 데이터 로드를 따로 대기
         sc = await _clipreport_scope(report)
         tgt = pdf_dir / pdf_save.doc_name("접수증", [], include_name, label)
-        if sc and await _clipreport_print(sc, tgt, log, save=save):
+        if sc and await _clipreport_print(sc, tgt, log, save=save, expect_layer=False):
             result["saved"].append(tgt.name)
             log(f"[v] (홈택스) 접수증 {'저장' if save else '출력'}: {tgt.name}")
         else:
@@ -744,31 +761,44 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
         log("[!] (홈택스) 신고서 보기 뷰어 없음")
         return result
 
-    items = []
-    for frame in viewer.frames:
-        try:
-            els = frame.locator("a, li")
-            for i in range(min(await els.count(), 100)):
-                el = els.nth(i)
-                if await el.is_visible():
-                    t = " ".join((await el.inner_text()).split())
-                    if ("계산서" in t or "명세서" in t) and len(t) < 40 and t not in items:
-                        items.append(t)
-        except Exception:
-            continue
+    # 신고서 목록 수집 — 프레임당 JS 한 번(요소별 await 왕복 제거), 목록 렌더까지 폴링.
+    items: list = []
+    for _ in range(12):   # 최대 ~6초
+        for frame in viewer.frames:
+            try:
+                found = await frame.evaluate("""() => {
+                    const vis = el => { const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0; };
+                    const out = [];
+                    for (const el of document.querySelectorAll('a, li')) {
+                        if (!vis(el)) continue;
+                        const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                        if ((t.includes('계산서') || t.includes('명세서'))
+                                && t.length < 40 && !out.includes(t)) out.push(t);
+                    }
+                    return out;
+                }""")
+            except Exception:
+                continue
+            for t in found:
+                if t not in items:
+                    items.append(t)
+        if items:
+            break
+        await viewer.wait_for_timeout(500)
     log(f"[i] (홈택스) 신고서 {len(items)}건: {items}")
     for it in items:
         if not await _click_text_in_frames(viewer, it):
             log(f"  [!] 목록 클릭 실패: {it}")
             continue
-        await viewer.wait_for_timeout(2500)
+        await viewer.wait_for_timeout(800)   # _clipreport_print가 데이터 로드를 따로 대기
         sc = await _clipreport_scope(viewer)
         if sc is None:
             result["failed"].append(it)
             continue
         fname = pdf_save.doc_name("신고서", [it], include_name, label)
         tgt = pdf_dir / fname
-        if await _clipreport_print(sc, tgt, log, save=save):
+        if await _clipreport_print(sc, tgt, log, save=save, expect_layer=True):
             result["saved"].append(fname)
             log(f"[v] (홈택스) 신고서 {'저장' if save else '출력'}: {fname}")
         else:
