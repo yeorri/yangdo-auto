@@ -433,12 +433,23 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
     def _count(body: str) -> int:
         return sum(1 for k in keys if k in body)
 
+    # 전부 보이면 즉시 진행. 일부가 끝내 매칭 안 되는 경우(말줄임이 12자보다 짧게
+    # 잘리는 파일명 등)를 위해 '개수가 1.5초간 안 늘면' 등록 완료로 보고 진행 —
+    # 안 그러면 30회(15초)를 꽉 채우는 헛대기가 됨.
     registered = 0
+    prev, stable = -1, 0
     for _ in range(30):
         await popup.wait_for_timeout(500)
         registered = _count(await _popup_body(popup))
         if registered >= len(names):
             break
+        if registered > 0 and registered == prev:
+            stable += 1
+            if stable >= 3:
+                break
+        else:
+            stable = 0
+        prev = registered
     if registered == 0:
         if await _click_btn_in_popup(popup, ("첨부", "추가", "등록", "파일추가", "올리기"), log):
             await popup.wait_for_timeout(1500)
