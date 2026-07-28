@@ -692,14 +692,62 @@ async def _clipreport_scope(window):
     return None
 
 
+async def _clipreport_save_pdf(page, scope, target, log=print) -> bool:
+    """clipreport 리포트를 pdfDownLoad()로 내려받아 target에 저장.
+
+    ⭐ Windows 저장 다이얼로그(pywinauto) 없이 브라우저 다운로드로 받는다 →
+    다른 프로그램(양도박사·세무사랑) 쓰는 중에도 포커스를 뺏지 않아 안전하고 빠름.
+    신고서 뷰어는 저장 버튼이 UI에 숨겨져 있을 뿐 pdfDownLoad는 살아있다(정찰 확인).
+    받은 파일이 진짜 PDF(%PDF)인지 시그니처까지 검증.
+    """
+    try:
+        await scope.wait_for_function(_CLIPREPORT_LOADED, timeout=30000)
+    except Exception:
+        log("  [!] (홈택스) clipreport 데이터 로드 대기 시간초과(계속)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        async with page.expect_download(timeout=60000) as dl:
+            r = await scope.evaluate("""() => {
+                const m = window.m_reportHashMap; if(!m) return 'no-map';
+                const k = Object.keys(m)[0]; if(!k) return 'no-key';
+                try { m[k].pdfDownLoad(); return 'ok'; }
+                catch(e) { return 'ERR ' + e.message; }
+            }""")
+            if not isinstance(r, str) or r != "ok":
+                log(f"  [!] (홈택스) pdfDownLoad 호출 실패: {r}")
+                return False
+        d = await dl.value
+        await d.save_as(str(target))
+    except Exception as e:
+        log(f"  [!] (홈택스) PDF 다운로드 실패: {str(e)[:80]}")
+        return False
+    try:
+        if target.read_bytes()[:4] != b"%PDF":
+            log(f"  [!] (홈택스) 받은 파일이 PDF가 아님: {target.name}")
+            return False
+    except Exception:
+        return False
+    log(f"    PDF: ✓ 다운로드 저장 ({target.name})")
+    return True
+
+
 async def _clipreport_print(scope, target, log=print, save: bool = True,
-                            expect_layer: bool | None = None) -> bool:
+                            expect_layer: bool | None = None, page=None) -> bool:
     """clipreport 인쇄 → (save=True) PDF 저장 / (save=False) 기본 프린터로 출력.
 
     데이터 로드 → printWindowView() → (인쇄방식 레이어가 뜨면 change 발화로 PDF DOM 초기화
     + mRe_printExportInfo) → save면 fill_and_save. 레이어 없으면(접수증) printWindowView가 곧 인쇄.
     expect_layer: True=레이어 확실(신고서) / False=레이어 없음(접수증, 폴링 스킵) / None=모름(폴링).
+    page: 주면 PDF 저장 시 pdfDownLoad() 다운로드 방식을 먼저 시도(다이얼로그 없음).
     """
+    # ⭐ PDF 저장은 다운로드 방식 우선 — Windows 다이얼로그가 없어 다른 프로그램 사용 중에도
+    # 안전하고, 텍스트가 살아있는 PDF가 나온다. 실패 시에만 기존 인쇄 방식으로 폴백.
+    if save and page is not None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tgt = pdf_save.prepare_target(target, log)
+        if await _clipreport_save_pdf(page, scope, tgt, log):
+            return True
+        log("  [i] (홈택스) 다운로드 저장 실패 — 인쇄 방식으로 폴백")
     try:
         await scope.wait_for_function(_CLIPREPORT_LOADED, timeout=30000)
     except Exception:
@@ -767,7 +815,8 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
         await report.wait_for_timeout(400)   # _clipreport_print가 데이터 로드를 따로 대기
         sc = await _clipreport_scope(report)
         tgt = pdf_dir / pdf_save.doc_name("접수증", [], include_name, label)
-        if sc and await _clipreport_print(sc, tgt, log, save=save, expect_layer=False):
+        if sc and await _clipreport_print(sc, tgt, log, save=save, expect_layer=False,
+                                          page=report):
             result["saved"].append(tgt.name)
             log(f"[v] (홈택스) 접수증 {'저장' if save else '출력'}: {tgt.name}")
         else:
@@ -828,7 +877,7 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
             continue
         fname = pdf_save.doc_name("신고서", [it], include_name, label)
         tgt = pdf_dir / fname
-        if await _clipreport_print(sc, tgt, log, save=save, expect_layer=True):
+        if await _clipreport_print(sc, tgt, log, save=save, expect_layer=True, page=viewer):
             result["saved"].append(fname)
             log(f"[v] (홈택스) 신고서 {'저장' if save else '출력'}: {fname}")
         else:
@@ -907,7 +956,7 @@ async def print_napbu(ctx, page, pdf_dir, label: str = "", output_mode: str = "p
             sc = await _clipreport_scope(win)
             due = pdf_save.fmt_due(dues[i] if i < len(dues) else "")
             tgt = pdf_dir / pdf_save.doc_name("납부서", ["양도소득세", due], include_name, label)
-            if sc and await _clipreport_print(sc, tgt, log, save=save):
+            if sc and await _clipreport_print(sc, tgt, log, save=save, page=win):
                 result["saved"].append(tgt.name)
                 log(f"[v] (홈택스) 납부서 {'저장' if save else '출력'}: {tgt.name}")
             else:

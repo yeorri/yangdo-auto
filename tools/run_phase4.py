@@ -1,6 +1,7 @@
 """홈택스 출력 검증 — 접수증·신고서(hometax_docs) + 납부서(hometax_napbu) 호출.
 
-실행:  python tools/run_phase4.py <주민번호13>
+실행:  python tools/run_phase4.py <주민번호13> <저장폴더> <성명>
+       (인자 미지정 시 아래 상수 사용 — 실제 PII는 커밋하지 말 것)
 """
 from __future__ import annotations
 
@@ -40,6 +41,8 @@ async def wait_login(page, timeout=420):
 
 async def main():
     rrn = sys.argv[1] if len(sys.argv) > 1 else ""
+    save_dir = sys.argv[2] if len(sys.argv) > 2 else SAVE_DIR
+    name = sys.argv[3] if len(sys.argv) > 3 else NAME
 
     B.ensure_pdf_sticky_settings()
     async with async_playwright() as pw:
@@ -51,9 +54,9 @@ async def main():
             print("[!] 로그인 미감지"); await ctx.close(); return
 
         inp = Inputs(
-            name_label=NAME,
+            name_label=name,
             seller_rrn=rrn,
-            output_dir=SAVE_DIR,
+            output_dir=save_dir,
             output_mode="pdf",
             disclose_personal_info=True,
             include_name=True,   # 공동명의 등 → 파일명에 이름 포함
@@ -68,7 +71,7 @@ async def main():
             print(f"[결과] {mod.LABEL}: ok={res.ok} reason={res.reason}")
             print(f"  저장된 파일: {res.outputs}")
         print("[i] 저장 폴더:")
-        for f in sorted(Path(SAVE_DIR).glob("*.pdf")):
+        for f in sorted(Path(save_dir).glob("*.pdf")):
             print(f"  - {f.name} ({f.stat().st_size}b)")
 
         print("[i] 8초 후 종료")
