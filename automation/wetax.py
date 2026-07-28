@@ -209,11 +209,81 @@ async def _click_text_js(scope, text: str) -> bool:
     }""", text)
 
 
-async def _oz_print(oz, target, log=print, save: bool = True) -> bool:
-    """OZ 뷰어: [인쇄] → 인쇄옵션 [확인] → (save면) Microsoft Print to PDF 저장.
+async def _oz_save_pdf(oz, target, log=print) -> bool:
+    """OZ 뷰어 저장(내보내기)으로 PDF를 내려받아 target에 저장.
 
-    고정 대기 대신 버튼 등장을 0.3초 간격 폴링 — 뷰어가 빨리 뜨면 그만큼 빨리 진행.
+    ⭐ Windows 저장 다이얼로그 없음 → 다른 프로그램 사용 중에도 포커스를 뺏지 않음.
+    흐름: 툴바 저장 아이콘(input.btnSAVEAS) → 내보내기 창에서 파일형식 select
+    (#oztab_exportdlg_filetype)를 'Adobe PDF File(*.pdf)'로 변경(기본값은 .ozd!)
+    → [확인] → 브라우저 다운로드 → %PDF 시그니처 검증.
     """
+    from pathlib import Path as _P
+    target = _P(target)
+    # 1) 저장 아이콘 클릭 (인쇄 아이콘과 혼동 금지 — 클래스로 정확히 지정)
+    opened = await oz.evaluate("""() => {
+        const el = document.querySelector('input.btnSAVEAS, .btnSAVEAS');
+        if (!el) return false;
+        el.click(); return true;
+    }""")
+    if not opened:
+        log("  [!] (위택스) OZ 저장 아이콘(btnSAVEAS) 못 찾음")
+        return False
+    # 2) 내보내기 창 등장 대기(파일형식 select)
+    try:
+        await oz.wait_for_function(
+            "() => !!document.querySelector('#oztab_exportdlg_filetype')", timeout=8000)
+    except Exception:
+        log("  [!] (위택스) OZ 내보내기 창 미등장")
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target = pdf_save.prepare_target(target, log)
+    # 3) 형식을 PDF로 바꾸고 [확인] → 다운로드 가로채기
+    try:
+        async with oz.expect_download(timeout=60000) as dl:
+            r = await oz.evaluate("""() => {
+                const s = document.querySelector('#oztab_exportdlg_filetype');
+                if (!s) return 'no-select';
+                const o = [...s.options].find(x => /pdf/i.test(x.value + x.text));
+                if (!o) return 'no-pdf-option';
+                s.value = o.value;
+                s.dispatchEvent(new Event('change', {bubbles: true}));
+                const vis = el => { const b = el.getBoundingClientRect();
+                    return b.width > 0 && b.height > 0; };
+                for (const b of document.querySelectorAll('button, a, input[type=button]')) {
+                    if (!vis(b)) continue;
+                    const t = ((b.innerText || b.value || '') + '').trim();
+                    if (t === '확인' || t === 'OK') { b.click(); return 'ok'; }
+                }
+                return 'no-confirm';
+            }""")
+            if r != "ok":
+                log(f"  [!] (위택스) OZ 내보내기 실패: {r}")
+                return False
+        d = await dl.value
+        await d.save_as(str(target))
+    except Exception as e:
+        log(f"  [!] (위택스) PDF 다운로드 실패: {str(e)[:80]}")
+        return False
+    try:
+        if target.read_bytes()[:4] != b"%PDF":
+            log(f"  [!] (위택스) 받은 파일이 PDF가 아님: {target.name}")
+            return False
+    except Exception:
+        return False
+    log(f"    PDF: ✓ 다운로드 저장 ({target.name})")
+    return True
+
+
+async def _oz_print(oz, target, log=print, save: bool = True) -> bool:
+    """OZ 뷰어에서 PDF 저장 또는 인쇄.
+
+    save(pdf) 모드는 다운로드 방식 우선(_oz_save_pdf) — 저장 다이얼로그 없음.
+    실패 시/출력 모드는 [인쇄] → 인쇄옵션 [확인] → (save면) Microsoft Print to PDF 폴백.
+    """
+    if save:
+        if await _oz_save_pdf(oz, target, log):
+            return True
+        log("  [i] (위택스) 다운로드 저장 실패 — 인쇄 방식으로 폴백")
     clicked = False
     for _ in range(17):   # 최대 ~5초
         if await _click_text_js(oz, "인쇄"):

@@ -47,7 +47,10 @@ async def main():
         if not await wait_login(page):
             await ctx.close(); return
 
-        inp = Inputs(name_label=NAME, output_dir=SAVE, output_mode="pdf", include_name=True,
+        # 인자: <저장폴더> <성명> (미지정 시 위 상수) — 실제 PII는 커밋 금지
+        save_dir = sys.argv[1] if len(sys.argv) > 1 else SAVE
+        name = sys.argv[2] if len(sys.argv) > 2 else NAME
+        inp = Inputs(name_label=name, output_dir=save_dir, output_mode="pdf", include_name=True,
                      napbu_wait_sec=0)  # 테스트라 대기 없이
 
         def emit(kind, **kw):
