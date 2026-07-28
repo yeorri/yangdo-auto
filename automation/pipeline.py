@@ -49,7 +49,19 @@ def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
     src = [str(out_dir / f) for f in ordered]
     out_name = pdf_save.doc_name("접수증&신고서", [], inp.include_name, inp.name_label)
     log(f"[i] 병합 순서: {' + '.join(ordered)} → {out_name}")
-    pdf_save.merge_pdfs(src, out_dir / out_name, log)
+    if not pdf_save.merge_pdfs(src, out_dir / out_name, log):
+        return
+    # 병합에 성공했을 때만 개별 원본 삭제(옵션). 납부서는 대상 아님 — 병합에 안 들어감.
+    if not inp.delete_merged_sources:
+        return
+    removed = 0
+    for p in src:
+        try:
+            Path(p).unlink()
+            removed += 1
+        except Exception as e:  # noqa: BLE001
+            log(f"[!] 원본 삭제 실패: {Path(p).name} ({str(e)[:40]})")
+    log(f"[i] 병합본만 남김 — 개별 접수증·신고서 {removed}개 삭제")
 
 
 def ordered_selected(selected_keys: list[str]):

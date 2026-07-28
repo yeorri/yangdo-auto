@@ -22,6 +22,7 @@ class Inputs:
     disclose_personal_info: bool = True # 서류 출력 시 개인정보 공개 여부(디폴트 공개)
     include_name: bool = False          # 서류 파일명에 성명 포함(공동명의 등)
     merge_docs: bool = False            # 접수증+신고서들 PDF 병합([접수증&신고서]) 여부
+    delete_merged_sources: bool = False  # 병합 성공 시 개별 접수증·신고서 원본 삭제
     napbu_wait_sec: int = 180           # 위택스 납부서 출력 전 가상계좌 생성 대기(초)
 
 
