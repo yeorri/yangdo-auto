@@ -775,54 +775,55 @@ async def open_receipt_docs(ctx, page, rrn: str, log=print) -> bool:
 
 
 async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
-    """'신고서 보기 개인정보 공개여부' 팝업: 공개/비공개 선택 + 적용 (자식 frame 순회).
+    """'신고서 보기 개인정보 공개여부' 팝업: 공개/비공개 선택 + [적용].
 
-    팝업이 늦게 뜰 수 있어 등장을 폴링한다 — 놓치면 서류가 마스킹된 채 저장된다.
+    ⚠ '개인정보…' 문구는 신고서 보기 창에도 있어서, 조건에 맞는 '첫 창 하나'만 보면
+      엉뚱한 창을 잡고 [적용]을 못 찾은 채 끝난다(실제 실패 원인).
+      → 모든 창 × 모든 프레임을 돌며 [적용]을 찾을 때까지 시도하고, 그 전체를 폴링한다.
+      놓치면 서류가 마스킹(주민번호 ***)된 채 저장되므로 중요.
     """
     target = "개인정보 공개" if disclose else "개인정보 비공개"
-
-    async def _is_popup(p):
-        b = await p.locator("body").inner_text(timeout=2000)
-        return "공개여부" in b or "개인정보가 공개된" in b
-
-    found = await wait_page(ctx, _is_popup, timeout=12)
-    if found is None:
-        log("[!] (홈택스) 개인정보 공개여부 팝업을 찾지 못함 — 기본값(비공개)로 출력될 수 있음")
-        return False
-    for frame in found.frames:
-        # 1) 라디오 선택 — 라벨 클릭이 먹지 않는 경우가 있어 JS로 input을 직접 선택.
-        try:
-            await frame.evaluate("""(want) => {
-                const norm = s => (s || '').replace(/\\s+/g, '');
-                for (const inp of document.querySelectorAll('input[type=radio]')) {
-                    let txt = '';
-                    if (inp.id) {
-                        const l = document.querySelector('label[for="' + inp.id + '"]');
-                        if (l) txt = l.innerText || '';
-                    }
-                    if (!txt && inp.parentElement) txt = inp.parentElement.innerText || '';
-                    if (norm(txt).includes(norm(want))) {
-                        inp.click();
-                        if (!inp.checked) inp.checked = true;
-                        inp.dispatchEvent(new Event('change', {bubbles: true}));
-                        return true;
-                    }
-                }
-                return false;
-            }""", target)
-        except Exception:
-            pass
-        # 2) [적용] 클릭 — ⚠ 태그를 한정한 JS 탐색은 버튼을 놓친다(span/div일 수 있음).
-        #    모든 요소를 보는 get_by_text가 검증된 방식이라 이쪽을 쓴다.
-        try:
-            aply = frame.get_by_text("적용", exact=True).first
-            if await aply.count() and await aply.is_visible():
-                await aply.click(timeout=3000)
-                log(f"[i] (홈택스) 개인정보 {('공개' if disclose else '비공개')} 적용")
-                await found.wait_for_timeout(800)
-                return True
-        except Exception:
-            continue
+    radio_js = """(want) => {
+        const norm = s => (s || '').replace(/\s+/g, '');
+        for (const inp of document.querySelectorAll('input[type=radio]')) {
+            let txt = '';
+            if (inp.id) {
+                const l = document.querySelector('label[for="' + inp.id + '"]');
+                if (l) txt = l.innerText || '';
+            }
+            if (!txt && inp.parentElement) txt = inp.parentElement.innerText || '';
+            if (norm(txt).includes(norm(want))) {
+                inp.click();
+                if (!inp.checked) inp.checked = true;
+                inp.dispatchEvent(new Event('change', {bubbles: true}));
+                return true;
+            }
+        }
+        return false;
+    }"""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 12.0
+    while True:
+        for page in list(ctx.pages):
+            for frame in page.frames:
+                try:
+                    await frame.evaluate(radio_js, target)   # 1) 라디오 선택
+                except Exception:
+                    pass
+                try:
+                    # 2) [적용] — 모든 요소를 보는 get_by_text가 검증된 방식
+                    #    (태그를 한정한 JS 탐색은 span/div 버튼을 놓친다)
+                    aply = frame.get_by_text("적용", exact=True).first
+                    if await aply.count() and await aply.is_visible():
+                        await aply.click(timeout=3000)
+                        log(f"[i] (홈택스) 개인정보 {('공개' if disclose else '비공개')} 적용")
+                        await page.wait_for_timeout(800)
+                        return True
+                except Exception:
+                    continue
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(0.5)
     log("[!] (홈택스) 개인정보 공개여부 [적용] 클릭 실패")
     return False
 
