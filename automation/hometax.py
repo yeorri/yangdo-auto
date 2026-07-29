@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 
 from . import pdf_save
@@ -507,8 +508,61 @@ async def _click_btn_in_popup(popup, texts: tuple, log=print) -> bool:
     return False
 
 
+async def _attach_probe(popup) -> dict:
+    """진단용 한 컷: 프레임별 body 텍스트 + input[type=file]들의 files 개수.
+
+    첨부 목록이 '들어왔다가 사라지는' 구간을 잡으려면 500ms 폴링으론 놓친다 →
+    이 한 컷을 짧은 간격으로 찍어 타임라인을 만든다.
+    """
+    body, fcount = [], []
+    for fr in popup.frames:
+        try:
+            r = await fr.evaluate("""() => ({
+                text: (document.body && document.body.innerText) || '',
+                files: Array.from(document.querySelectorAll('input[type=file]'))
+                            .map(i => (i.files ? i.files.length : -1)),
+            })""")
+        except Exception:
+            continue
+        body.append(r.get("text") or "")
+        fcount.extend(r.get("files") or [])
+    return {"body": "\n".join(body), "files": fcount}
+
+
+def _write_attach_dump(dump_dir, names, timeline, console, errors, net, dmsgs, log) -> None:
+    """첨부 등록 실패(0개)일 때만 호출 — 사라진 순간의 홈택스 쪽 신호를 파일로 남긴다."""
+    from datetime import datetime
+    try:
+        d = Path(dump_dir) if dump_dir else (Path.home() / "Downloads")
+        d.mkdir(parents=True, exist_ok=True)
+        out = d / f"attach_dump_{datetime.now():%Y%m%d_%H%M%S}.txt"
+        lines = [
+            "# 부속서류 첨부 진단 덤프",
+            f"첨부 시도 파일 {len(names)}개: {names}",
+            "",
+            "## 타임라인 (주입 직후, matched=목록에서 매칭된 파일명 수 / files=input의 파일 수)",
+            *timeline,
+            "",
+            f"## 콘솔 메시지 ({len(console)})",
+            *console[-60:],
+            "",
+            f"## 페이지 JS 오류 ({len(errors)})",
+            *errors[-30:],
+            "",
+            f"## 네트워크 응답 ({len(net)})",
+            *net[-80:],
+            "",
+            f"## JS 알림(dialog) ({len(dmsgs)})",
+            *dmsgs[-30:],
+        ]
+        out.write_text("\n".join(lines), encoding="utf-8")
+        log(f"[i] (홈택스) 첨부 진단 덤프 저장: {out.name}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[!] (홈택스) 진단 덤프 저장 실패: {str(e)[:60]}")
+
+
 async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bool = True,
-                                  parent=None) -> bool:
+                                  parent=None, dump_dir=None) -> bool:
     """첨부 팝업에서 파일 주입(multiple) → 등록 확인 → '부속서류 제출하기' → 완료 검증.
 
     ⚠ 빈 제출 방지: 제출 전 첨부 파일명이 목록에 등록됐는지(N/M) 확인.
@@ -525,30 +579,88 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
         except Exception:
             pass
 
+    # 진단: 첨부가 목록에 들어왔다가 사라지는 원인을 잡기 위해 팝업의 콘솔·JS오류·
+    # 서버응답을 모아둔다(등록 0개일 때만 파일로 남김). 수집만 하므로 동작엔 영향 없음.
+    console_msgs: list = []
+    page_errors: list = []
+    net_log: list = []
+    _SKIP_EXT = (".js", ".css", ".png", ".gif", ".jpg", ".jpeg", ".ico", ".woff", ".woff2")
+
+    def _on_console(m):
+        try:
+            console_msgs.append(f"[{m.type}] {m.text[:200]}")
+        except Exception:
+            pass
+
+    t0 = time.monotonic()
+    last_action = [t0]          # 마지막 wqAction(화면 액션) 응답 시각 — 주입 타이밍 판단용
+
+    def _on_response(r):
+        try:
+            u = r.url or ""
+            if u.split("?")[0].lower().endswith(_SKIP_EXT):
+                return
+            if "wqAction.do" in u:
+                last_action[0] = time.monotonic()
+            net_log.append(f"+{time.monotonic() - t0:5.2f}s {r.status} {r.request.method} {u[:160]}")
+        except Exception:
+            pass
+
+    try:
+        popup.on("console", _on_console)
+        popup.on("pageerror", lambda e: page_errors.append(str(e)[:300]))
+        popup.on("response", _on_response)
+    except Exception:
+        pass
+
     # ⚠ 팝업이 떠도 그 안의 파일 입력칸은 늦게 렌더된다. 프레임을 '한 번만' 순회하면
     #   아직 없는 상태를 보고 즉시 실패 → 호출측이 팝업을 닫아, 화면상 '창이 떴다가
     #   첨부 없이 꺼지는' 증상이 된다(라이브에서 실제 발생) → 등장할 때까지 폴링.
-    injected = False
+    file_input = None
     for _ in range(30):                 # 최대 ~12초
-        found_input = False
         for frame in popup.frames:
             try:
-                fin = frame.locator("input[type=file]")
-                if await fin.count() > 0:
-                    found_input = True
-                    await fin.first.set_input_files(files, timeout=15000)
-                    injected = True
+                loc = frame.locator("input[type=file]")
+                if await loc.count() > 0:
+                    file_input = loc.first
                     break
-            except Exception as e:
-                # 입력칸은 찾았는데 주입이 실패 = 파일 자체 문제(경로/권한/클라우드).
-                # 재시도해도 소용없으므로 즉시 중단하고 원인을 남긴다.
-                log(f"[!] (홈택스) 부속서류 주입 실패: {str(e)[:100]}")
-                return False
-        if injected or found_input:
+            except Exception:
+                continue
+        if file_input is not None:
             break
         await popup.wait_for_timeout(400)
-    if not injected:
+    if file_input is None:
         log("[!] (홈택스) 첨부 팝업에 파일 입력칸이 나타나지 않음(12초 대기)")
+        return False
+
+    async def _inject() -> bool:
+        """파일 주입. 실패는 파일 자체 문제(경로/권한/클라우드)라 재시도 무의미."""
+        try:
+            await file_input.set_input_files(files, timeout=15000)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log(f"[!] (홈택스) 부속서류 주입 실패: {str(e)[:100]}")
+            return False
+
+    async def _wait_settled(quiet: float = 1.5, timeout: float = 10.0) -> None:
+        """팝업의 화면 액션(wqAction) 응답이 quiet초 동안 없을 때까지 대기.
+
+        ⚠ 이걸 안 하면 주입한 행이 통째로 사라진다 — 파일 입력칸은 팝업 초기화 도중
+        이미 존재하는데, 팝업 자신의 첨부목록 조회(ATTCMGAA001R03)가 아직 날아가는
+        중이다. 우리가 먼저 꽂으면 그 뒤 도착한 조회 응답이 그리드를 서버 결과(빈 목록)로
+        다시 바인딩하면서 방금 넣은 행을 덮어쓴다.
+        (라이브 진단 2건 동일: 주입 0.2초 뒤 6/6 → 소멸, JS오류·경고창·실패응답 전무,
+         구간 내 서버 호출은 그 조회 1건뿐.)
+        """
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            if time.monotonic() - last_action[0] >= quiet:
+                return
+            await popup.wait_for_timeout(200)
+        log("[i] (홈택스) 첨부 목록 조회가 계속 이어짐 — 대기 한도 도달, 그대로 진행")
+
+    await _wait_settled()
+    if not await _inject():
         return False
     # 첨부 등록 확인: 파일명이 전부 목록에 보일 때까지 폴링(다건은 렌더가 늦음).
     # ⚠ 목록의 표시 이름은 픽셀 폭 기준 말줄임(…)이라 파일마다 잘리는 위치가 다르고
@@ -571,23 +683,59 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
                     break
         return found
 
-    # 전부 보이면 즉시 진행. 일부가 끝내 매칭 안 되는 경우(말줄임이 12자보다 짧게
-    # 잘리는 파일명 등)를 위해 '개수가 1.5초간 안 늘면' 등록 완료로 보고 진행 —
-    # 안 그러면 30회(15초)를 꽉 채우는 헛대기가 됨.
-    registered = 0
-    prev, stable = -1, 0
-    for _ in range(30):
-        await popup.wait_for_timeout(500)
-        registered = _count(await _popup_body(popup))
-        if registered >= len(names):
-            break
-        if registered > 0 and registered == prev:
-            stable += 1
-            if stable >= 3:
+    # 진단 타임라인: 첨부가 목록에 들어왔다가 사라지는 구간은 0.5초 폴링으론 못 본다
+    # (라이브에서 '순간적으로 다 들어왔다가 바로 사라짐' 관찰) → 200ms×15로 먼저 훑는다.
+    # ⚠ 전부 매칭됐다고 바로 빠져나오면 '올라왔다 사라지는' 구간을 못 본다 → 끝까지 훑되
+    #   3연속 전부 매칭이면(=안정) 그때 중단.
+    timeline: list = []
+
+    async def _scan(tag: str) -> int:
+        peak, full = 0, 0
+        for i in range(15):
+            await popup.wait_for_timeout(200)
+            snap = await _attach_probe(popup)
+            m = _count(snap["body"])
+            peak = max(peak, m)
+            timeline.append(f"  [{tag}] t={0.2*(i+1):.1f}s  matched={m}/{len(names)}  "
+                            f"files={snap['files']}  "
+                            f"결과없음표시={'조회된 결과가 없습니다' in snap['body']}")
+            full = full + 1 if m >= len(names) else 0
+            if full >= 3:
                 break
-        else:
-            stable = 0
-        prev = registered
+        return peak
+
+    registered = 0
+    peak = 0
+    for attempt in (1, 2):
+        peak = max(peak, await _scan(f"{attempt}차"))
+
+        # 전부 보이면 즉시 진행. 일부가 끝내 매칭 안 되는 경우(말줄임이 12자보다 짧게
+        # 잘리는 파일명 등)를 위해 '개수가 1.5초간 안 늘면' 등록 완료로 보고 진행 —
+        # 안 그러면 30회(15초)를 꽉 채우는 헛대기가 됨.
+        prev, stable, zero = -1, 0, 0
+        for _ in range(30):
+            await popup.wait_for_timeout(500)
+            registered = _count(await _popup_body(popup))
+            if registered >= len(names):
+                break
+            if registered > 0 and registered == prev:
+                stable += 1
+                if stable >= 3:
+                    break
+            else:
+                stable = 0
+            # 올라왔다가 사라진 게 확인되면 남은 폴링은 헛대기 → 3초만 보고 끊는다.
+            zero = zero + 1 if (registered == 0 and peak > 0) else 0
+            if zero >= 6:
+                break
+            prev = registered
+        if registered > 0 or attempt == 2:
+            break
+        # 사라졌다면 조회가 그리드를 덮어쓴 것 → 조회가 끝난 지금 다시 꽂아본다.
+        log(f"[i] (홈택스) 첨부 목록이 비었음(최대 {peak}개까지 보였음) — 조회 완료 후 재주입")
+        await _wait_settled()
+        if not await _inject():
+            return False
     if registered == 0:
         if await _click_btn_in_popup(popup, ("첨부", "추가", "등록", "파일추가", "올리기"), log):
             await popup.wait_for_timeout(1500)
@@ -601,6 +749,10 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
         if missing:
             log(f"[i] (홈택스) 목록에서 매칭 안 된 파일명: {missing}")
     if registered == 0:
+        if peak > 0:
+            log(f"[!] (홈택스) 첨부가 목록에 올라왔다가 사라짐 — 최대 {peak}/{len(names)}개까지 보였음")
+        _write_attach_dump(dump_dir, names, timeline, console_msgs, page_errors,
+                           net_log, dmsgs, log)
         log("[!] (홈택스) 첨부 파일이 목록에 등록되지 않음 — 제출 중단(빈 제출 방지)")
         return False
     log(f"[v] (홈택스) 부속서류 {len(files)}개 첨부 (목록 확인 {registered})")

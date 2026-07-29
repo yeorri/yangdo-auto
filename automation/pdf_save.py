@@ -272,8 +272,18 @@ def merge_pdfs(src_paths, out_path, log=print) -> bool:
             writer.append(str(p))
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "wb") as f:
-            writer.write(f)
+        # 같은 이름 병합본을 PDF 뷰어(알PDF 등)가 열어두면 덮어쓰기가 거부된다.
+        # 거부됐을 때만 시각을 붙인 새 이름으로 저장 — 병합본 없이 끝나는 일은 없게.
+        try:
+            with open(out_path, "wb") as f:
+                writer.write(f)
+        except PermissionError:
+            from datetime import datetime
+            out_path = out_path.with_name(
+                f"{out_path.stem}_{datetime.now():%H%M%S}{out_path.suffix}")
+            log(f"    기존 병합본 잠김(뷰어에서 열려 있음) — 새 이름으로 저장: {out_path.name}")
+            with open(out_path, "wb") as f:
+                writer.write(f)
         writer.close()
         log(f"[v] 병합 완료: {out_path.name} ({len(paths)}개)")
         return True
