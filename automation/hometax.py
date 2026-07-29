@@ -185,8 +185,12 @@ async def verify_and_wait(page, log=print, timeout: int = 150) -> str:
         log(f"[!] (홈택스) 파일검증하기 클릭 실패: {str(e)[:80]}")
         return "시간초과"
     await handle_prev_record_modal(page, log)
+    # 검증이 시작될 시간을 준다. ⚠ 이 대기가 없으면 이전 신고인 화면의 잔재('제출하러 가기'
+    # 버튼은 검증 전에도 존재)를 보고 0초 만에 '검증 완료'로 오판해, 엉뚱한 화면에서
+    # 제출까지 진행되는 사고가 난다(라이브에서 실제 발생).
+    await page.wait_for_timeout(2500)
 
-    # '검증 중입니다' 오버레이가 사라지면 완료. (제출하러 가기 버튼은 검증중에도 존재하므로 기준 X)
+    # '검증 중입니다' 오버레이가 사라지고 결과 영역이 보이면 완료.
     seen_validating = False
     for sec in range(0, timeout, 2):
         try:
@@ -196,8 +200,9 @@ async def verify_and_wait(page, log=print, timeout: int = 150) -> str:
         validating = "검증 중입니다" in body or "검증중입니다" in body
         if validating:
             seen_validating = True
-        elif "내용검증" in body or "제출하러 가기" in body:
-            # 오버레이 없음 + 결과 영역 존재 = 완료
+        elif "내용검증" in body:
+            # 오버레이 없음 + 검증 결과 영역 존재 = 완료
+            # ('제출하러 가기'는 검증 전에도 있으므로 완료 신호로 쓰지 않는다)
             log(f"[v] (홈택스) 검증 완료 ({sec}s)")
             return "완료"
         if sec % 10 == 0:
@@ -285,8 +290,10 @@ async def submit_filing(page, log=print) -> bool:
     # 접수증 모달 등장 = 제출 성공. 닫지 않고 그대로 둔다(다음 phase가 리셋).
     if await _wait_receipt_modal(page, log):
         return True
-    log("[!] (홈택스) 제출됨(추정) 그러나 접수증 모달 미확인 — 화면 확인 필요")
-    return True
+    # ⚠ 예전엔 여기서도 True를 돌려줬는데, 실제로 제출이 안 된 경우(엉뚱한 화면에서 제출
+    # 시도 등)까지 성공으로 보고돼 뒷 단계가 줄줄이 헛돌았다 → 실패로 처리한다.
+    log("[!] (홈택스) 접수증 미확인 — 제출 실패로 처리(화면 확인 필요)")
+    return False
 
 
 # ─────────────────── 부속·증빙서류 제출 (Phase 3) ───────────────────
@@ -705,17 +712,29 @@ async def _clipreport_save_pdf(page, scope, target, log=print) -> bool:
     except Exception:
         log("  [!] (홈택스) clipreport 데이터 로드 대기 시간초과(계속)")
     target.parent.mkdir(parents=True, exist_ok=True)
+    # 데이터 로드 신호가 이전 리포트 것일 수 있어(목록에서 다음 신고서를 막 클릭한 직후)
+    # 짧게 안정화. 이게 없으면 첫 신고서에서 다운로드가 시작되지 않고 타임아웃 났다.
+    await scope.wait_for_timeout(700)
     try:
-        async with page.expect_download(timeout=60000) as dl:
-            r = await scope.evaluate("""() => {
-                const m = window.m_reportHashMap; if(!m) return 'no-map';
-                const k = Object.keys(m)[0]; if(!k) return 'no-key';
-                try { m[k].pdfDownLoad(); return 'ok'; }
-                catch(e) { return 'ERR ' + e.message; }
-            }""")
-            if not isinstance(r, str) or r != "ok":
-                log(f"  [!] (홈택스) pdfDownLoad 호출 실패: {r}")
-                return False
+        # 1차 실패 시 한 번 더 시도 — 뷰어가 아직 준비 안 됐던 경우를 구제(타임아웃 단축).
+        for attempt in (1, 2):
+            try:
+                async with page.expect_download(timeout=25000) as dl:
+                    r = await scope.evaluate("""() => {
+                        const m = window.m_reportHashMap; if(!m) return 'no-map';
+                        const k = Object.keys(m)[0]; if(!k) return 'no-key';
+                        try { m[k].pdfDownLoad(); return 'ok'; }
+                        catch(e) { return 'ERR ' + e.message; }
+                    }""")
+                    if not isinstance(r, str) or r != "ok":
+                        log(f"  [!] (홈택스) pdfDownLoad 호출 실패: {r}")
+                        return False
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                log("  [i] (홈택스) 다운로드 미시작 — 재시도")
+                await scope.wait_for_timeout(1500)
         d = await dl.value
         await d.save_as(str(target))
     except Exception as e:

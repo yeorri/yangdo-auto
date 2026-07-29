@@ -45,6 +45,19 @@ def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
     if len(ordered) < 2:
         log(f"[i] 병합 대상 부족({len(ordered)}개) — 병합 생략")
         return
+    # ⚠ 일부만 성공한 상태로 병합하면 서류가 빠진 병합본이 만들어지고,
+    #   '개별 원본 삭제'까지 켜져 있으면 원본마저 사라진다 → 완전할 때만 병합.
+    missing = []
+    if not receipt:
+        missing.append("접수증")
+    for key, label in (("hometax_docs", "홈택스 접수증·신고서"), ("wetax_docs", "위택스 신고서")):
+        res = next((r for r in results if r.key == key), None)
+        if res is not None and not res.ok:
+            missing.append(f"{label} 실패")
+    if missing:
+        log(f"[!] 병합 생략 — 서류가 완전하지 않음 ({', '.join(missing)}). "
+            f"개별 파일은 그대로 두었습니다.")
+        return
     out_dir = Path(inp.output_dir) if inp.output_dir else (Path.home() / "Downloads")
     src = [str(out_dir / f) for f in ordered]
     out_name = pdf_save.doc_name("접수증&신고서", [], inp.include_name, inp.name_label)

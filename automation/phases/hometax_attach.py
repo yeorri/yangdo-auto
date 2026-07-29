@@ -44,6 +44,21 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         res.reason = "폴더에 첨부할 파일 없음"
         log(f"[!] {res.reason}")
         return res
+
+    # ⚠ OneDrive '파일 온디맨드'는 목록엔 보여도 로컬에 실체가 없어 열 때 WinError 2가 난다.
+    #   주입 전에 실제로 읽히는지 확인해, 어떤 파일이 문제인지 로그로 남긴다.
+    bad = []
+    for f in files:
+        try:
+            with open(f, "rb") as fh:
+                fh.read(1)
+        except Exception as e:  # noqa: BLE001
+            bad.append(f"{Path(f).name} ({type(e).__name__})")
+    if bad:
+        res.reason = f"열 수 없는 파일 {len(bad)}개 — 첨부 중단"
+        log(f"[!] {res.reason}: {', '.join(bad[:5])}")
+        log("[i] OneDrive 등 클라우드 폴더면 해당 파일을 '이 장치에 항상 유지'로 받아두세요.")
+        return res
     if not inp.seller_rrn or len(inp.seller_rrn.replace("-", "")) != 13:
         res.reason = "양도인 주민번호(13자리) 필요"
         log(f"[!] {res.reason}")

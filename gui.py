@@ -256,7 +256,10 @@ class CellPill(tk.Canvas):
         label, fill, fg = self.STYLES.get(self.status, self.STYLES["idle"])
         if not self.enabled:                 # 단계 자체가 꺼짐
             fill, fg, label = "#F1F5F9", "#94A3B8", "꺼짐"
-        elif not on and self.status in ("idle", "ok"):
+        elif self.status in ("ok", "fail", "run"):
+            pass          # 실행 결과는 체크 여부와 무관하게 그대로 보여준다
+            # (완료 후 체크가 자동으로 풀려도 '완료'가 '제외'로 바뀌면 안 됨)
+        elif not on:
             fill, fg, label = "#F8FAFC", "#94A3B8", "제외"
         round_rect(self, 1, 1, self.w - 1, self.h - 1, 8, fill=fill, outline="")
         mark = "☑" if (on and self.enabled) else "☐"
