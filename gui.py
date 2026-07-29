@@ -260,9 +260,14 @@ class CellPill(tk.Canvas):
             fill, fg, label = "#F8FAFC", "#94A3B8", "제외"
         round_rect(self, 1, 1, self.w - 1, self.h - 1, 8, fill=fill, outline="")
         mark = "☑" if (on and self.enabled) else "☐"
-        self.create_text(12, self.h / 2, text=mark, fill=fg, font=(FONT, 8))
-        self.create_text(self.w / 2 + 6, self.h / 2, text=label, fill=fg,
-                         font=(FONT, 8, "bold"))
+        if self.w >= 56:                      # 넉넉하면 체크+글자
+            self.create_text(12, self.h / 2, text=mark, fill=fg, font=(FONT, 8))
+            self.create_text(self.w / 2 + 6, self.h / 2, text=label, fill=fg,
+                             font=(FONT, 8, "bold"))
+        else:                                  # 사람이 많아 좁아지면 체크+한 글자
+            self.create_text(self.w / 2 - 7, self.h / 2, text=mark, fill=fg, font=(FONT, 8))
+            self.create_text(self.w / 2 + 7, self.h / 2, text=label[0], fill=fg,
+                             font=(FONT, 8, "bold"))
 
 
 class Pill(tk.Canvas):
@@ -622,16 +627,22 @@ class App:
             return
         active = [pv for pv in self.people if not self._is_blank(pv)]
         n = max(1, len(active))
+        # 사람이 늘면 셀을 좁혀 한 줄에 유지(이름 헤더와 폭을 똑같이 맞춰 정렬)
+        cw = 62 if n <= 3 else (50 if n == 4 else 42)
+        self._cell_w = cw
         # 헤더(이름)
         for w in self._matrix_head.winfo_children():
             w.destroy()
-        tk.Label(self._matrix_head, text="", bg=CARD).pack(side="left")
         box = tk.Frame(self._matrix_head, bg=CARD)
         box.pack(side="right")
         for i in range(n):
             nm = (active[i]["name"].get().strip() if i < len(active) else "") or f"{i + 1}번"
-            tk.Label(box, text=nm[:5], width=8, anchor="center", bg=CARD, fg=MUTE,
-                     font=(FONT, 8, "bold")).pack(side="left")
+            # 셀과 동일 규격(폭 cw + 좌우 padx 1)으로 맞춰야 이름과 칸이 정확히 정렬된다
+            holder = tk.Frame(box, bg=CARD, width=cw, height=14)
+            holder.pack(side="left", padx=1)
+            holder.pack_propagate(False)
+            tk.Label(holder, text=nm[:4], bg=CARD, fg=MUTE,
+                     font=(FONT, 8, "bold")).pack(expand=True)
         # 셀
         old = self._cell_vars
         self._cells.clear()
@@ -644,7 +655,7 @@ class App:
                 key = (mod.KEY, i)
                 v = old.get(key) or tk.BooleanVar(value=True)
                 self._cell_vars[key] = v
-                cell = CellPill(holder, v, CARD)
+                cell = CellPill(holder, v, CARD, width=cw)
                 cell.pack(side="left", padx=1)
                 cell.set_enabled(self._phase_vars[mod.KEY].get())
                 self._cells[key] = cell
@@ -702,12 +713,12 @@ class App:
         holder = tk.Frame(body, bg=CARD)
         holder.pack(side="left", fill="x", expand=True)
         self.pcanvas = tk.Canvas(holder, bg=CARD, highlightthickness=0, height=h)
-        hsb = ttk.Scrollbar(holder, orient="horizontal", command=self.pcanvas.xview)
+        # 가로 스크롤바는 열이 넘칠 때만 표시(_fit_person_cols에서 pack/forget)
+        self._hsb = ttk.Scrollbar(holder, orient="horizontal", command=self.pcanvas.xview)
         self.pcols = tk.Frame(self.pcanvas, bg=CARD)
         self._pwin = self.pcanvas.create_window((0, 0), window=self.pcols, anchor="nw")
-        self.pcanvas.configure(xscrollcommand=hsb.set)
+        self.pcanvas.configure(xscrollcommand=self._on_xscroll)
         self.pcanvas.pack(side="top", fill="x", expand=True)
-        hsb.pack(side="bottom", fill="x")
         self.pcols.bind("<Configure>",
                         lambda e: self.pcanvas.configure(scrollregion=self.pcanvas.bbox("all")))
         self.pcanvas.bind("<Configure>", self._fit_person_cols)
@@ -715,6 +726,17 @@ class App:
         # 기본으로 빈 칸 하나 — 바로 직접 입력할 수 있게(신고인 선택 시 이 칸부터 채워짐)
         self.people = [self._new_person()]
         self._render_people()
+
+    def _on_xscroll(self, first, last):
+        """스크롤 위치 갱신 + 넘칠 때만 스크롤바 표시."""
+        self._hsb.set(first, last)
+        try:
+            if float(first) <= 0.0 and float(last) >= 1.0:
+                self._hsb.pack_forget()
+            elif not self._hsb.winfo_ismapped():
+                self._hsb.pack(side="bottom", fill="x")
+        except Exception:
+            pass
 
     def _fit_person_cols(self, event=None):
         """열이 3개 이하면 캔버스 폭에 맞춰 늘리고, 넘치면 최소 폭 유지(가로 스크롤)."""
