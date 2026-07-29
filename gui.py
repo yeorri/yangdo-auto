@@ -729,11 +729,21 @@ class App:
             pass
 
     def _sync_row_enabled(self, phase_key: str):
-        """단계 토글 on/off를 그 행의 셀들에 반영."""
+        """단계 토글 on/off를 그 행의 셀들에 반영.
+
+        토글을 다시 켜면 '이 단계를 다시 하겠다'는 뜻이므로, 완료/실패 표시를 지우고
+        체크된 '대기' 상태로 되돌린다(완료 후 체크가 자동으로 풀려 있어도 재실행 가능).
+        """
         on = self._phase_vars[phase_key].get()
-        for (k, _i), cell in getattr(self, "_cells", {}).items():
-            if k == phase_key:
-                cell.set_enabled(on)
+        for (k, i), cell in getattr(self, "_cells", {}).items():
+            if k != phase_key:
+                continue
+            cell.set_enabled(on)
+            if on:
+                cell.set_status("idle")
+                v = self._cell_vars.get((k, i))
+                if v is not None and not v.get():
+                    v.set(True)
 
     # 입력 항목 정의 — (라벨, 키, 선택방식, 힌트). 순서 = 자동입력 4개 → 사용자 선택 2개
     PERSON_FIELDS = [
