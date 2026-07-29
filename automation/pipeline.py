@@ -267,6 +267,83 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
     return results
 
 
+def _person_emit(emit: Emit, idx: int) -> Emit:
+    """사람 인덱스를 붙여 전달하는 emit 래퍼. run_phases가 내는 'done'은 삼킨다
+    (배치 전체가 끝났을 때 한 번만 done을 보내야 하므로)."""
+    def e(kind, **kw):
+        if kind == "done":
+            return
+        emit(kind, person=idx, **kw)
+    return e
+
+
+async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
+                    stop_check: Callable[[], bool] | None = None) -> list:
+    """여러 신고인을 순차 실행. 한 명이 실패해도 다음 사람은 계속 진행.
+
+    jobs: [(Inputs, [phase_key, ...]), ...] — 신고인마다 실행할 단계가 다를 수 있다
+          (완료된 단계는 GUI가 빼고 넘겨 실패분만 재시도되게 함).
+    ⑦ 위택스 납부서(가상계좌 대기)는 **전원 나머지 단계를 끝낸 뒤 마지막에 몰아서** 한다.
+    앞사람 가상계좌가 뒷사람 처리 중에 이미 생성돼 대기 시간이 거의 사라진다.
+    """
+    def log(m: str):
+        emit("log", text=m)
+
+    if not jobs:
+        log("[!] 실행할 신고인이 없습니다.")
+        emit("done", results=[])
+        return []
+
+    last_key = "wetax_napbu"
+    defer_napbu = len(jobs) > 1 and any(last_key in keys for _inp, keys in jobs)
+
+    out: list = [[] for _ in jobs]
+    for idx, (inp, keys) in enumerate(jobs):
+        if stop_check and stop_check():
+            log("[i] 중단됨.")
+            break
+        main_keys = [k for k in keys if k != last_key] if defer_napbu else list(keys)
+        who = inp.name_label or f"{idx + 1}번"
+        if not main_keys:
+            continue
+        log(f"[i] ########## {who} ({idx + 1}/{len(jobs)}) ##########")
+        emit("person", index=idx, status="run")
+        try:
+            res = await run_phases(session, main_keys, inp, _person_emit(emit, idx), stop_check)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log(f"[!] {who} 예외: {e}")
+            res = []
+        out[idx] = res
+        ok = bool(res) and all(r.ok for r in res)
+        emit("person", index=idx, status="ok" if ok else "fail")
+
+    # 미뤄둔 위택스 납부서 — 전원 몰아서
+    if defer_napbu and not (stop_check and stop_check()):
+        log("[i] ########## 위택스 납부서 (전원) ##########")
+        for idx, (inp, keys) in enumerate(jobs):
+            if stop_check and stop_check():
+                log("[i] 중단됨.")
+                break
+            if last_key not in keys:
+                continue
+            who = inp.name_label or f"{idx + 1}번"
+            log(f"[i] ----- {who} 위택스 납부서 -----")
+            try:
+                res = await run_phases(session, [last_key], inp, _person_emit(emit, idx), stop_check)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log(f"[!] {who} 위택스 납부서 예외: {e}")
+                res = []
+            out[idx].extend(res)
+
+    log("[i] 전체 신고인 종료 — 브라우저는 유지됩니다.")
+    emit("done", results=out)
+    return out
+
+
 async def run_pipeline(selected_keys: list[str], inp: Inputs, emit: Emit,
                        stop_check: Callable[[], bool] | None = None) -> list[PhaseResult]:
     """1회성 실행(브라우저 종료까지) — 세션을 쓰지 않는 호출용 호환 래퍼."""
