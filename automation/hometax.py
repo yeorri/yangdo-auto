@@ -464,7 +464,13 @@ async def query_and_open_attach(ctx, page, rrn: str, log=print):
         async with ctx.expect_page(timeout=15000) as info:
             await page.get_by_text("첨부하기", exact=True).first.click(timeout=12000)
         popup = await info.value
-        await popup.wait_for_timeout(2000)
+        # 고정 2초 대신 문서 로드까지 대기(느린 PC에서 내용이 늦게 뜨는 경우 대비).
+        # 파일 입력칸 자체는 attach_files_and_submit이 다시 폴링한다.
+        try:
+            await popup.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        await popup.wait_for_timeout(600)
         log("[v] (홈택스) 부속서류 첨부 팝업 열림")
         return popup
     except Exception as e:
@@ -519,18 +525,30 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
         except Exception:
             pass
 
+    # ⚠ 팝업이 떠도 그 안의 파일 입력칸은 늦게 렌더된다. 프레임을 '한 번만' 순회하면
+    #   아직 없는 상태를 보고 즉시 실패 → 호출측이 팝업을 닫아, 화면상 '창이 떴다가
+    #   첨부 없이 꺼지는' 증상이 된다(라이브에서 실제 발생) → 등장할 때까지 폴링.
     injected = False
-    for frame in popup.frames:
-        try:
-            fin = frame.locator("input[type=file]")
-            if await fin.count() > 0:
-                await fin.first.set_input_files(files, timeout=15000)
-                injected = True
-                break
-        except Exception as e:
-            log(f"[!] (홈택스) 부속서류 주입 실패: {str(e)[:60]}")
+    for _ in range(30):                 # 최대 ~12초
+        found_input = False
+        for frame in popup.frames:
+            try:
+                fin = frame.locator("input[type=file]")
+                if await fin.count() > 0:
+                    found_input = True
+                    await fin.first.set_input_files(files, timeout=15000)
+                    injected = True
+                    break
+            except Exception as e:
+                # 입력칸은 찾았는데 주입이 실패 = 파일 자체 문제(경로/권한/클라우드).
+                # 재시도해도 소용없으므로 즉시 중단하고 원인을 남긴다.
+                log(f"[!] (홈택스) 부속서류 주입 실패: {str(e)[:100]}")
+                return False
+        if injected or found_input:
+            break
+        await popup.wait_for_timeout(400)
     if not injected:
-        log("[!] (홈택스) 첨부 팝업 file input 못 찾음")
+        log("[!] (홈택스) 첨부 팝업에 파일 입력칸이 나타나지 않음(12초 대기)")
         return False
     # 첨부 등록 확인: 파일명이 전부 목록에 보일 때까지 폴링(다건은 렌더가 늦음).
     # ⚠ 목록의 표시 이름은 픽셀 폭 기준 말줄임(…)이라 파일마다 잘리는 위치가 다르고
