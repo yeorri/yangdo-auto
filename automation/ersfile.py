@@ -71,25 +71,47 @@ HOMETAX_EXTS = (".01",)
 WETAX_EXTS = (".Y13", ".Y11")
 
 
-def group_by_person(paths) -> list[dict]:
-    """고른 변환파일들을 사람별로 묶는다. 확장자로 홈택스/위택스를 가르고,
-    **주민번호**로 같은 사람을 묶는다(동명이인 안전). 반환 순서 = 처음 등장 순.
+def parse_filename(path) -> dict:
+    """파일명에서 양도연월·자산종류 추출.
 
-    반환: [{name, rrn, hometax, wetax}, ...]
-      hometax/wetax 는 경로 문자열(없으면 '') — 사용자가 GUI에서 채우거나 고칠 수 있다.
+    양도박사 규칙: {양도|지방소득세}_{성명}_{자산}_{양도연월}_{코드}.{확장자}
+      예) 양도_홍길동_부동산_202608_C116300.01
+    자산은 부동산/주식 등으로 바뀔 수 있으나 **위치가 같아** 인덱스로 뽑는다.
+    ⚠ 파일 내부의 YYYYMM은 '신고 작성 시점'이라 양도연월과 다르다 — 목록 표시는 파일명 기준.
+    반환: {trade_ym, asset, name_in_file} (규칙이 다르면 빈 값)
     """
-    people: list[dict] = []
+    parts = Path(path).stem.split("_")
+    out = {"trade_ym": "", "asset": "", "name_in_file": ""}
+    if len(parts) >= 4:
+        out["name_in_file"] = parts[1]
+        out["asset"] = parts[2]
+        if re.fullmatch(r"20\d{4}", parts[3]):
+            out["trade_ym"] = parts[3]
+    return out
+
+
+def group_by_person(paths) -> list[dict]:
+    """고른 변환파일들을 신고건별로 묶는다. 확장자로 홈택스/위택스를 가르고,
+    **주민번호+양도연월**로 같은 건을 묶는다.
+
+    주민번호만으로 묶으면 같은 사람의 다른 양도건(202606/202608)이 한 줄로 합쳐지므로
+    양도연월(파일명)까지 키에 넣는다. 동명이인은 주민번호로 구분된다.
+    반환: [{name, rrn, trade_ym, hometax, wetax, mtime}, ...] (처음 등장 순)
+    """
+    rows: list[dict] = []
     index: dict[str, dict] = {}
     for p in paths:
         path = Path(p)
         info = parse_convert_file(path)
-        rrn, name = info["rrn"], info["name"]
-        key = rrn or f"?{path.stem}"          # 파싱 실패 시 파일별 개별 행
+        fn = parse_filename(path)
+        rrn, name = info["rrn"], info["name"] or fn["name_in_file"]
+        key = f"{rrn}|{fn['trade_ym']}" if rrn else f"?{path.stem}"
         row = index.get(key)
         if row is None:
-            row = {"name": name, "rrn": rrn, "hometax": "", "wetax": ""}
+            row = {"name": name, "rrn": rrn, "trade_ym": fn["trade_ym"],
+                   "asset": fn["asset"], "hometax": "", "wetax": "", "mtime": 0.0}
             index[key] = row
-            people.append(row)
+            rows.append(row)
         elif name and not row["name"]:
             row["name"] = name
         ext = path.suffix.upper()
@@ -97,7 +119,28 @@ def group_by_person(paths) -> list[dict]:
             row["hometax"] = str(path)
         elif ext in [e.upper() for e in WETAX_EXTS]:
             row["wetax"] = str(path)
-    return people
+        try:
+            row["mtime"] = max(row["mtime"], path.stat().st_mtime)
+        except Exception:
+            pass
+    return rows
+
+
+def scan_folder(folder) -> list[dict]:
+    """변환파일 폴더를 스캔해 신고건 목록을 최근 수정순으로 반환.
+
+    사용자가 폴더를 한 번 지정해두면 '신고인 선택' 목록을 여기서 만든다.
+    (양도박사가 재변환 시 덮어쓰므로 같은 건은 한 줄로 유지된다.)
+    """
+    root = Path(folder)
+    if not root.is_dir():
+        return []
+    exts = [e.upper() for e in HOMETAX_EXTS + WETAX_EXTS]
+    paths = [p for p in root.iterdir()
+             if p.is_file() and p.suffix.upper() in exts]
+    rows = group_by_person(paths)
+    rows.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows
 
 
 def find_sibling(convert_path, exts=(".Y13", ".Y11")) -> str:
