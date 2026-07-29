@@ -777,55 +777,40 @@ async def open_receipt_docs(ctx, page, rrn: str, log=print) -> bool:
 async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
     """'신고서 보기 개인정보 공개여부' 팝업: 공개/비공개 선택 + [적용].
 
-    ⚠ '개인정보…' 문구는 신고서 보기 창에도 있어서, 조건에 맞는 '첫 창 하나'만 보면
-      엉뚱한 창을 잡고 [적용]을 못 찾은 채 끝난다(실제 실패 원인).
-      → 모든 창 × 모든 프레임을 돌며 [적용]을 찾을 때까지 시도하고, 그 전체를 폴링한다.
+    ⚠ 검증된 원본 방식(Playwright 라벨 클릭 → [적용] 클릭)을 그대로 쓴다.
+      라디오를 JS로 직접 조작하면 WebSquare가 화면을 다시 그리면서 [적용] 참조가
+      틀어져 클릭에 실패했다(실제 회귀). 폴링만 덧씌워 팝업이 늦게 떠도 잡는다.
       놓치면 서류가 마스킹(주민번호 ***)된 채 저장되므로 중요.
     """
     target = "개인정보 공개" if disclose else "개인정보 비공개"
-    radio_js = """(want) => {
-        const norm = s => (s || '').replace(/\s+/g, '');
-        for (const inp of document.querySelectorAll('input[type=radio]')) {
-            let txt = '';
-            if (inp.id) {
-                const l = document.querySelector('label[for="' + inp.id + '"]');
-                if (l) txt = l.innerText || '';
-            }
-            if (!txt && inp.parentElement) txt = inp.parentElement.innerText || '';
-            if (norm(txt).includes(norm(want))) {
-                inp.click();
-                if (!inp.checked) inp.checked = true;
-                inp.dispatchEvent(new Event('change', {bubbles: true}));
-                return true;
-            }
-        }
-        return false;
-    }"""
     loop = asyncio.get_event_loop()
     deadline = loop.time() + 12.0
     while True:
-        for page in list(ctx.pages):
-            for frame in page.frames:
+        for p in list(ctx.pages):
+            try:
+                b = await p.locator("body").inner_text(timeout=2000)
+            except Exception:
+                continue
+            if "공개여부" not in b and "개인정보가 공개된" not in b:
+                continue      # 공개여부 팝업이 아닌 창은 건너뜀
+            for frame in p.frames:
                 try:
-                    await frame.evaluate(radio_js, target)   # 1) 라디오 선택
+                    lab = frame.get_by_text(target, exact=True).first
+                    if await lab.count() and await lab.is_visible():
+                        await lab.click(timeout=3000)
                 except Exception:
                     pass
                 try:
-                    # 2) [적용] — 모든 요소를 보는 get_by_text가 검증된 방식
-                    #    (태그를 한정한 JS 탐색은 span/div 버튼을 놓친다)
                     aply = frame.get_by_text("적용", exact=True).first
                     if await aply.count() and await aply.is_visible():
                         await aply.click(timeout=3000)
                         log(f"[i] (홈택스) 개인정보 {('공개' if disclose else '비공개')} 적용")
-                        await page.wait_for_timeout(800)
                         return True
                 except Exception:
-                    continue
+                    pass
         if loop.time() >= deadline:
-            break
+            return False
         await asyncio.sleep(0.5)
-    log("[!] (홈택스) 개인정보 공개여부 [적용] 클릭 실패")
-    return False
 
 
 async def wait_page(ctx, pred, timeout: float = 15.0, interval: float = 0.4):
