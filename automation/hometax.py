@@ -738,15 +738,18 @@ async def open_receipt_docs(ctx, page, rrn: str, log=print) -> bool:
 
 
 async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
-    """'신고서 보기 개인정보 공개여부' 팝업: 공개/비공개 선택 + 적용 (자식 frame 순회)."""
+    """'신고서 보기 개인정보 공개여부' 팝업: 공개/비공개 선택 + 적용 (자식 frame 순회).
+
+    팝업이 늦게 뜰 수 있어 등장을 폴링한다 — 놓치면 서류가 마스킹된 채 저장된다.
+    """
     target = "개인정보 공개" if disclose else "개인정보 비공개"
-    for p in list(ctx.pages):
-        try:
-            b = await p.locator("body").inner_text(timeout=2000)
-        except Exception:
-            continue
-        if "공개여부" not in b and "개인정보가 공개된" not in b:
-            continue
+
+    async def _is_popup(p):
+        b = await p.locator("body").inner_text(timeout=2000)
+        return "공개여부" in b or "개인정보가 공개된" in b
+
+    found = await wait_page(ctx, _is_popup, timeout=10)
+    for p in ([found] if found else []):
         for frame in p.frames:
             try:
                 lab = frame.get_by_text(target, exact=True).first
@@ -765,20 +768,48 @@ async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
     return False
 
 
-async def _clipreport_scope(window):
-    """window 또는 그 자식 frame 중 m_reportHashMap을 가진 scope 반환."""
-    try:
-        if await window.evaluate("() => !!window.m_reportHashMap"):
-            return window
-    except Exception:
-        pass
-    for frame in window.frames:
+async def wait_page(ctx, pred, timeout: float = 15.0, interval: float = 0.4):
+    """조건(pred)에 맞는 page가 나타날 때까지 폴링. 없으면 None.
+
+    ⚠ 창을 '한 번만' 찾으면 느린 PC·네트워크에서 아직 안 뜬 창을 놓쳐 그대로 실패한다
+    (라이브에서 실제 발생) — 출력 관련 창 탐색은 반드시 이 함수를 쓸 것.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while True:
+        for p in list(ctx.pages):
+            try:
+                if await pred(p):
+                    return p
+            except Exception:
+                continue
+        if loop.time() >= deadline:
+            return None
+        await asyncio.sleep(interval)
+
+
+async def _clipreport_scope(window, timeout: float = 12.0):
+    """window 또는 그 자식 frame 중 m_reportHashMap을 가진 scope 반환.
+
+    뷰어 스크립트가 늦게 초기화될 수 있어 등장할 때까지 폴링한다(1회 확인은 실패 원인).
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while True:
         try:
-            if await frame.evaluate("() => !!window.m_reportHashMap"):
-                return frame
+            if await window.evaluate("() => !!window.m_reportHashMap"):
+                return window
         except Exception:
-            continue
-    return None
+            pass
+        for frame in window.frames:
+            try:
+                if await frame.evaluate("() => !!window.m_reportHashMap"):
+                    return frame
+            except Exception:
+                continue
+        if loop.time() >= deadline:
+            return None
+        await asyncio.sleep(0.4)
 
 
 async def _clipreport_save_pdf(page, scope, target, log=print) -> bool:
@@ -910,8 +941,10 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
     await set_disclosure(ctx, disclose, log)
     await page.wait_for_timeout(1500)
 
-    # 접수증 (clipreport.do 최상위 창)
-    report = next((p for p in ctx.pages if "clipreport" in (p.url or "")), None)
+    # 접수증 (clipreport.do 최상위 창) — 창이 뜰 때까지 대기(1회 탐색은 놓칠 수 있음)
+    report = await wait_page(ctx, lambda p: "clipreport" in (p.url or ""), timeout=15)
+    if report is None:
+        log("[!] (홈택스) 접수증 창(clipreport)이 뜨지 않음")
     if report:
         await report.wait_for_timeout(400)   # _clipreport_print가 데이터 로드를 따로 대기
         sc = await _clipreport_scope(report)
@@ -928,15 +961,11 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
             pass
     await page.wait_for_timeout(1000)
 
-    # 신고서 보기 뷰어
-    viewer = None
-    for p in ctx.pages:
-        try:
-            if "신고서 목록" in await p.locator("body").inner_text(timeout=2000):
-                viewer = p
-                break
-        except Exception:
-            continue
+    # 신고서 보기 뷰어 — 창이 뜰 때까지 대기
+    async def _is_viewer(p):
+        return "신고서 목록" in await p.locator("body").inner_text(timeout=2000)
+
+    viewer = await wait_page(ctx, _is_viewer, timeout=15)
     if viewer is None:
         log("[!] (홈택스) 신고서 보기 뷰어 없음")
         return result

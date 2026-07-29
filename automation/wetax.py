@@ -183,17 +183,25 @@ async def open_inquiry(page, log=print) -> bool:
 
 
 async def _expand_taxpayer(page, name: str, log=print) -> bool:
-    """신고내역 목록에서 name 행의 '출력물 보기' 클릭 → 신고서/납부서 링크 펼침."""
-    clicked = await page.evaluate("""(name) => {
-        const anchors=[...document.querySelectorAll('a')].filter(a=>
-            (a.id||'').startsWith('ui-id')||(a.title||'').includes('출력')||(a.textContent||'').includes('출력물'));
-        for(const a of anchors){
-            const row=a.closest('tr')||a.closest('li')||(a.parentElement&&a.parentElement.parentElement);
-            if(row && (row.innerText||'').includes(name)){ a.click(); return true; }
-        }
-        return false;
-    }""", name)
-    await page.wait_for_timeout(2000)
+    """신고내역 목록에서 name 행의 '출력물 보기' 클릭 → 신고서/납부서 링크 펼침.
+
+    신고내역 표가 늦게 렌더될 수 있어 등장할 때까지 폴링(1회 시도는 놓치는 원인).
+    """
+    clicked = False
+    for _ in range(25):          # 최대 ~10초
+        clicked = await page.evaluate("""(name) => {
+            const anchors=[...document.querySelectorAll('a')].filter(a=>
+                (a.id||'').startsWith('ui-id')||(a.title||'').includes('출력')||(a.textContent||'').includes('출력물'));
+            for(const a of anchors){
+                const row=a.closest('tr')||a.closest('li')||(a.parentElement&&a.parentElement.parentElement);
+                if(row && (row.innerText||'').includes(name)){ a.click(); return true; }
+            }
+            return false;
+        }""", name)
+        if clicked:
+            break
+        await page.wait_for_timeout(400)
+    await page.wait_for_timeout(1500)
     if not clicked:
         log(f"[!] (위택스) '{name}' 출력물 보기 못 찾음")
     return clicked
@@ -374,13 +382,19 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
         specs.append(("납부서", True, pdf_save.doc_name("납부서", ["지방세", due], include_name, name)))
 
     for kind, has_y, fname in specs:
-        exists = await page.evaluate("""(hasY) => {
-            for(const a of document.querySelectorAll('a')){
-                const oc=a.getAttribute('onclick')||'';
-                if(oc.includes('openReport')){ if(oc.includes("'Y'")===hasY) return true; }
-            }
-            return false;
-        }""", has_y)
+        # 출력물 링크가 펼쳐지는 데 시간이 걸릴 수 있어 잠시 폴링(없으면 진짜 없는 것 = 차손 등)
+        exists = False
+        for _ in range(10):      # 최대 ~4초
+            exists = await page.evaluate("""(hasY) => {
+                for(const a of document.querySelectorAll('a')){
+                    const oc=a.getAttribute('onclick')||'';
+                    if(oc.includes('openReport')){ if(oc.includes("'Y'")===hasY) return true; }
+                }
+                return false;
+            }""", has_y)
+            if exists:
+                break
+            await page.wait_for_timeout(400)
         if not exists:
             log(f"[i] (위택스) {kind} 없음 — 건너뜀")
             continue
