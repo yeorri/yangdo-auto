@@ -567,7 +567,11 @@ class App:
         # 세로 스크롤바는 내용이 넘칠 때만 표시(_on_yscroll) — 평소엔 안 보이게
         body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        # 휠은 '스크롤바가 떠 있을 때'(=내용이 넘칠 때)만 동작. 창 높이를 내용에 맞춰
+        # 잡으므로 평소엔 안 먹는다 — 다 보이는 화면이 휠에 밀리면 어색하기 때문.
+        canvas.bind_all("<MouseWheel>", lambda e: (
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+            if self._vsb.winfo_ismapped() else None))
 
         # 위: [실행 단계 | 옵션] 같은 높이로 나란히. 아래: [입력 정보] 전체 폭(긴 경로 잘 보이게).
         top = tk.Frame(body, bg=BG)
