@@ -789,14 +789,11 @@ async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
     if found is None:
         log("[!] (홈택스) 개인정보 공개여부 팝업을 찾지 못함 — 기본값(비공개)로 출력될 수 있음")
         return False
-    # 라디오는 라벨 클릭이 먹지 않을 때가 있어 JS로 input을 직접 선택하고 change를 발화.
     for frame in found.frames:
+        # 1) 라디오 선택 — 라벨 클릭이 먹지 않는 경우가 있어 JS로 input을 직접 선택.
         try:
-            ok = await frame.evaluate("""(want) => {
-                const vis = el => { const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0; };
-                // 1) 라디오 선택: 라벨 텍스트가 want인 input[type=radio]
-                let picked = false;
+            await frame.evaluate("""(want) => {
+                const norm = s => (s || '').replace(/\\s+/g, '');
                 for (const inp of document.querySelectorAll('input[type=radio]')) {
                     let txt = '';
                     if (inp.id) {
@@ -804,30 +801,28 @@ async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
                         if (l) txt = l.innerText || '';
                     }
                     if (!txt && inp.parentElement) txt = inp.parentElement.innerText || '';
-                    if (txt.replace(/\\s+/g, '').includes(want.replace(/\\s+/g, ''))) {
+                    if (norm(txt).includes(norm(want))) {
                         inp.click();
-                        if (!inp.checked) { inp.checked = true; }
+                        if (!inp.checked) inp.checked = true;
                         inp.dispatchEvent(new Event('change', {bubbles: true}));
-                        picked = true;
-                        break;
+                        return true;
                     }
                 }
-                // 2) [적용] 클릭
-                for (const el of document.querySelectorAll(
-                        'a, button, input[type=button], input[type=submit]')) {
-                    if (!vis(el)) continue;
-                    const t = ((el.innerText || el.value || '') + '').trim();
-                    if (t === '적용') { el.click(); return picked ? 'ok' : 'apply-only'; }
-                }
-                return picked ? 'picked-no-apply' : 'none';
+                return false;
             }""", target)
         except Exception:
+            pass
+        # 2) [적용] 클릭 — ⚠ 태그를 한정한 JS 탐색은 버튼을 놓친다(span/div일 수 있음).
+        #    모든 요소를 보는 get_by_text가 검증된 방식이라 이쪽을 쓴다.
+        try:
+            aply = frame.get_by_text("적용", exact=True).first
+            if await aply.count() and await aply.is_visible():
+                await aply.click(timeout=3000)
+                log(f"[i] (홈택스) 개인정보 {('공개' if disclose else '비공개')} 적용")
+                await found.wait_for_timeout(800)
+                return True
+        except Exception:
             continue
-        if ok in ("ok", "apply-only"):
-            log(f"[i] (홈택스) 개인정보 {('공개' if disclose else '비공개')} 적용"
-                + ("" if ok == "ok" else " (라디오 미확인)"))
-            await found.wait_for_timeout(800)
-            return True
     log("[!] (홈택스) 개인정보 공개여부 [적용] 클릭 실패")
     return False
 
@@ -1008,8 +1003,11 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
     save = (output_mode == "pdf")
     result = {"saved": [], "failed": []}
 
-    await set_disclosure(ctx, disclose, log)
-    await page.wait_for_timeout(1500)
+    # ⚠ 공개여부를 적용하지 못하면 서류가 기본값(비공개=주민번호 ***)으로 저장된다.
+    #   조용히 넘어가면 마스킹된 서류를 받게 되므로 눈에 띄게 경고한다.
+    if not await set_disclosure(ctx, disclose, log):
+        log("[!] (홈택스) 개인정보 공개여부 미적용 — 서류가 마스킹될 수 있습니다(확인 필요)")
+    await page.wait_for_timeout(1200)
 
     # 접수증 (clipreport.do 최상위 창) — 창이 뜰 때까지 대기(1회 탐색은 놓칠 수 있음)
     report = await wait_page(ctx, lambda p: "clipreport" in (p.url or ""), timeout=15)
