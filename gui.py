@@ -593,18 +593,30 @@ class App:
             tk.Label(head, text=subtitle, bg=CARD, fg=MUTE, font=(FONT, 8)).pack(side="left", padx=(8, 0))
         return (c, head) if ret_head else c
 
+    MROW_H = 32      # 매트릭스 행 높이 — 라벨 열과 셀 열 정렬용
+    MHEAD_H = 16     # 신고인 이름 헤더 높이
+
     def _build_phase_card(self, parent, expand=False):
         c = self._card(parent, "실행 단계", "단계 토글 = 전원 · 칸 클릭 = 그 사람만", expand=expand)
-        # 신고인 헤더(이름) — 사람이 바뀔 때마다 다시 그림
-        self._matrix_head = tk.Frame(c, bg=CARD)
-        self._matrix_head.pack(fill="x", padx=16, pady=(0, 2))
         self._cells: dict = {}          # (phase_key, person_idx) -> CellPill
         self._cell_vars: dict = {}      # (phase_key, person_idx) -> BooleanVar
         self._phase_rows: dict = {}     # phase_key -> 셀이 들어갈 프레임
 
+        body = tk.Frame(c, bg=CARD)
+        body.pack(fill="x", padx=16, pady=(0, 8))
+        h = self.MHEAD_H + self.MROW_H * len(ALL_PHASES)
+
+        # 왼쪽: 단계 라벨(토글·배지·이름) — 가로 스크롤해도 고정.
+        # ⚠ width를 반드시 지정 — pack_propagate(False)라 미지정 시 부모 폭을 다 먹어
+        #   오른쪽 셀 캔버스와 겹치고 스크롤 판정이 깨진다.
+        left = tk.Frame(body, bg=CARD, width=250, height=h)
+        left.pack(side="left", anchor="n")
+        left.pack_propagate(False)
+        tk.Frame(left, bg=CARD, height=self.MHEAD_H).pack(fill="x")   # 헤더 자리 맞춤
         for i, mod in enumerate(ALL_PHASES, 1):
-            row = tk.Frame(c, bg=CARD)
-            row.pack(fill="x", padx=16, pady=2)
+            row = tk.Frame(left, bg=CARD, height=self.MROW_H)
+            row.pack(fill="x")
+            row.pack_propagate(False)
             var = tk.BooleanVar(value=True)
             self._phase_vars[mod.KEY] = var
             var.trace_add("write", lambda *a, k=mod.KEY: self._sync_row_enabled(k))
@@ -616,10 +628,39 @@ class App:
                          padx=6, pady=1).pack(side="left", padx=(10, 6))
             tk.Label(row, text=f"{i}. {mod.LABEL}", bg=CARD, fg=INK,
                      font=(FONT, 9)).pack(side="left")
-            holder = tk.Frame(row, bg=CARD)
-            holder.pack(side="right")
+
+        # 오른쪽: 신고인별 셀 — 사람이 많으면 가로 스크롤(스크롤바는 넘칠 때만)
+        right = tk.Frame(body, bg=CARD)
+        right.pack(side="left", fill="x", expand=True)
+        self.mcanvas = tk.Canvas(right, bg=CARD, highlightthickness=0, height=h)
+        self._mhsb = ttk.Scrollbar(right, orient="horizontal", command=self.mcanvas.xview)
+        self.minner = tk.Frame(self.mcanvas, bg=CARD)
+        self._mwin = self.mcanvas.create_window((0, 0), window=self.minner, anchor="nw")
+        self.mcanvas.configure(xscrollcommand=self._on_mxscroll)
+        self.mcanvas.pack(side="top", fill="x", expand=True)
+        self.minner.bind("<Configure>",
+                         lambda e: self.mcanvas.configure(scrollregion=self.mcanvas.bbox("all")))
+
+        # 셀 영역 안: 헤더(이름) 한 줄 + 단계별 행
+        self._matrix_head = tk.Frame(self.minner, bg=CARD, height=self.MHEAD_H)
+        self._matrix_head.pack(fill="x")
+        self._matrix_head.pack_propagate(False)
+        for mod in ALL_PHASES:
+            holder = tk.Frame(self.minner, bg=CARD, height=self.MROW_H)
+            holder.pack(fill="x")
+            holder.pack_propagate(False)
             self._phase_rows[mod.KEY] = holder
-        tk.Frame(c, bg=CARD, height=6).pack()
+
+    def _on_mxscroll(self, first, last):
+        """실행 단계 셀 영역 — 넘칠 때만 가로 스크롤바 표시."""
+        self._mhsb.set(first, last)
+        try:
+            if float(first) <= 0.0 and float(last) >= 1.0:
+                self._mhsb.pack_forget()
+            elif not self._mhsb.winfo_ismapped():
+                self._mhsb.pack(side="bottom", fill="x")
+        except Exception:
+            pass
 
     def _render_phase_matrix(self):
         """신고인 수에 맞춰 단계×신고인 셀을 다시 그린다(사람 추가/삭제 시 호출)."""
@@ -627,18 +668,15 @@ class App:
             return
         active = [pv for pv in self.people if not self._is_blank(pv)]
         n = max(1, len(active))
-        # 사람이 늘면 셀을 좁혀 한 줄에 유지(이름 헤더와 폭을 똑같이 맞춰 정렬)
-        cw = 62 if n <= 3 else (50 if n == 4 else 42)
+        # 셀 폭은 고정 — 사람이 많으면 좁히는 대신 가로 스크롤로 처리(글자 안 깨짐)
+        cw = 62
         self._cell_w = cw
-        # 헤더(이름)
+        # 헤더(이름) — 셀과 동일 규격(폭 cw + 좌우 padx 1)이어야 정확히 정렬된다
         for w in self._matrix_head.winfo_children():
             w.destroy()
-        box = tk.Frame(self._matrix_head, bg=CARD)
-        box.pack(side="right")
         for i in range(n):
             nm = (active[i]["name"].get().strip() if i < len(active) else "") or f"{i + 1}번"
-            # 셀과 동일 규격(폭 cw + 좌우 padx 1)으로 맞춰야 이름과 칸이 정확히 정렬된다
-            holder = tk.Frame(box, bg=CARD, width=cw, height=14)
+            holder = tk.Frame(self._matrix_head, bg=CARD, width=cw, height=self.MHEAD_H)
             holder.pack(side="left", padx=1)
             holder.pack_propagate(False)
             tk.Label(holder, text=nm[:4], bg=CARD, fg=MUTE,
@@ -656,9 +694,15 @@ class App:
                 v = old.get(key) or tk.BooleanVar(value=True)
                 self._cell_vars[key] = v
                 cell = CellPill(holder, v, CARD, width=cw)
-                cell.pack(side="left", padx=1)
+                cell.pack(side="left", padx=1, pady=4)
                 cell.set_enabled(self._phase_vars[mod.KEY].get())
                 self._cells[key] = cell
+        # 셀 영역 폭 갱신 — 넘치면 스크롤바가 자동으로 나타난다
+        try:
+            need = n * (cw + 2)
+            self.mcanvas.itemconfig(self._mwin, width=max(need, self.mcanvas.winfo_width()))
+        except Exception:
+            pass
 
     def _sync_row_enabled(self, phase_key: str):
         """단계 토글 on/off를 그 행의 셀들에 반영."""
