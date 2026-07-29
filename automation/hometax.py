@@ -268,6 +268,77 @@ async def _wait_receipt_modal(page, log=print, timeout: int = 25) -> bool:
     return False
 
 
+async def check_and_save_warnings(page, out_dir=None, log=print) -> int:
+    """검증결과내역의 '오류납세자수(확인납세자수)'를 보고 경고(오류 아님)를 처리.
+
+    화면에 `0(1)`처럼 표시되면 오류 0건 / 경고 1건. 경고는 제출을 막지 않지만 확인이
+    필요하므로, 경고내역을 열어 엑셀로 내려받고(out_dir 지정 시) 모달을 닫는다.
+    반환: 경고 건수(없으면 0).
+    """
+    info = await page.evaluate("""() => {
+        const vis = el => { const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0; };
+        for (const a of document.querySelectorAll('a, span, td')) {
+            if (!vis(a)) continue;
+            const m = ((a.innerText || '') + '').trim().match(/^(\\d+)\\((\\d+)\\)$/);
+            if (m) return {text: m[0], err: +m[1], warn: +m[2]};
+        }
+        return null;
+    }""")
+    if not info or not info.get("warn"):
+        return 0
+    n = info["warn"]
+    log(f"[i] (홈택스) 내용검증 경고 {n}건 (오류 {info['err']}건) — 경고내역 확인")
+    # 1) 오류/경고 링크 클릭 → '내용검증(경고/안내)' 모달
+    await page.evaluate("""(txt) => {
+        const vis = el => { const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0; };
+        for (const a of document.querySelectorAll('a, span, td')) {
+            if (vis(a) && ((a.innerText || '') + '').trim() === txt) { a.click(); return; }
+        }
+    }""", info["text"])
+    await page.wait_for_timeout(1500)
+    # 2) [경고내역] 클릭 → '신고서 오류내역 조회' 상세
+    for label in ("경고내역", "오류내역"):
+        if await _click_btn_by_text(page, label):
+            break
+    await page.wait_for_timeout(1500)
+    # 3) 엑셀 내려받기 — 어떤 경고였는지 기록으로 남긴다
+    if out_dir:
+        from pathlib import Path as _P
+        d = _P(out_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            async with page.expect_download(timeout=20000) as dli:
+                await _click_btn_by_text(page, "엑셀 내려받기")
+            dl = await dli.value
+            tgt = d / f"[경고내역]{_P(dl.suggested_filename).name}"
+            await dl.save_as(str(tgt))
+            log(f"[i] (홈택스) 경고내역 저장: {tgt.name}")
+        except Exception as e:  # noqa: BLE001
+            log(f"[i] (홈택스) 경고내역 엑셀 저장 실패(계속): {str(e)[:60]}")
+    # 4) 모달 닫기(상세 → 목록 순서로 최대 3번)
+    for _ in range(3):
+        if not await _click_btn_by_text(page, "닫기"):
+            break
+        await page.wait_for_timeout(600)
+    return n
+
+
+async def _click_btn_by_text(page, text: str) -> bool:
+    """보이는 버튼/링크 중 텍스트가 정확히 일치하는 첫 요소를 JS로 클릭."""
+    return await page.evaluate("""(txt) => {
+        const vis = el => { const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0; };
+        for (const el of document.querySelectorAll('a, button, input[type=button], input[type=submit]')) {
+            if (!vis(el)) continue;
+            const t = ((el.innerText || el.value || '') + '').trim();
+            if (t === txt) { el.click(); return true; }
+        }
+        return false;
+    }""", text)
+
+
 async def submit_filing(page, log=print) -> bool:
     """검증완료 화면 → [제출하러 가기] → [전자파일 제출하기] → 제출확인 → 접수증 등장 확인.
 
@@ -279,6 +350,17 @@ async def submit_filing(page, log=print) -> bool:
     except Exception as e:
         log(f"[!] (홈택스) '제출하러 가기' 실패: {str(e)[:80]}")
         return False
+    # ⚠ 경고(오류 아님)가 있으면 '(경고/안내) 메시지가 있습니다' 알림이 떠 제출 화면으로
+    #   넘어가지 않는다. [확인]=경고내역 보기 / [취소]=그대로 제출 → 여기선 [취소].
+    #   (경고내역은 앞서 check_and_save_warnings에서 이미 저장해 둔다.)
+    try:
+        body = await page.locator("body").inner_text(timeout=2500)
+    except Exception:
+        body = ""
+    if "경고" in body and ("확인이 필요한" in body or "메시지가 있습니다" in body):
+        if await _click_btn_by_text(page, "취소"):
+            log("[i] (홈택스) 경고 안내 — [취소]로 그대로 제출 진행")
+            await page.wait_for_timeout(2000)
     try:
         await page.get_by_text(BTN_SUBMIT, exact=True).first.click(timeout=8000)
     except Exception as e:

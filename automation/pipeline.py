@@ -21,6 +21,17 @@ from .phases.base import Inputs, PhaseResult
 Emit = Callable[..., None]
 
 SITE_SUB = {"홈택스": "hometax.go.kr", "위택스": "wetax.go.kr"}
+
+# 앞 단계가 실패하면 의미가 없는(신고건 자체가 없는) 후속 단계 — 같은 실행에서
+# 그 신고 단계를 켰다가 실패한 경우에만 건너뛴다. 신고를 아예 안 켰으면(이미 신고됨)
+# 출력만 돌리는 정상 사용이므로 건너뛰지 않는다.
+DEPENDS_ON = {
+    "hometax_attach": "hometax_filing",
+    "hometax_docs": "hometax_filing",
+    "hometax_napbu": "hometax_filing",
+    "wetax_docs": "wetax_filing",
+    "wetax_napbu": "wetax_filing",
+}
 # 여는 순서: 홈택스 먼저 → 위택스 나중(새 탭이 맨 앞 = 위택스부터 로그인 유도)
 OPEN_ORDER = {"홈택스": 0, "위택스": 1}
 
@@ -250,10 +261,19 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
     merged = False
 
     ctx = session.ctx
+    failed_keys: set = set()
     for mod in phases:
         if stop_check and stop_check():
             log("[i] 중단됨.")
             break
+        # 선행 신고 단계가 이번 실행에서 실패했으면 후속 단계는 헛돌 뿐이라 건너뛴다
+        dep = DEPENDS_ON.get(mod.KEY)
+        if dep and dep in failed_keys:
+            log(f"[i] {mod.LABEL}: 건너뜀 — 선행 단계 실패(신고건 없음)")
+            res = PhaseResult(mod.KEY, mod.LABEL, ok=False, reason="선행 단계 실패로 건너뜀")
+            results.append(res)
+            emit("phase", key=mod.KEY, status="fail")
+            continue
         emit("phase", key=mod.KEY, status="run")
         log(f"[i] ===== {mod.LABEL} 시작 =====")
         try:
@@ -264,6 +284,8 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
             res = PhaseResult(mod.KEY, mod.LABEL, ok=False, reason=f"예외: {e}")
             log(f"[!] {mod.LABEL} 예외: {e}")
         results.append(res)
+        if not res.ok:
+            failed_keys.add(mod.KEY)
         emit("phase", key=mod.KEY, status="ok" if res.ok else "fail")
         tail = (f" / 접수 {res.receipt_no}" if res.receipt_no else "") + \
                (f" / {res.reason}" if res.reason else "")

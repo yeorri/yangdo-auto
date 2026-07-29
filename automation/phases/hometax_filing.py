@@ -51,6 +51,15 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         res.reason = f"검증 미완료({status})"
         return res
 
+    # 3-1) 내용검증 경고(오류 아님) 확인 — 있으면 경고내역을 엑셀로 받아 두고 모달을 닫는다.
+    #      (제출은 막히지 않지만 나중에 무슨 경고였는지 알아야 하므로 기록으로 남김)
+    try:
+        warns = await H.check_and_save_warnings(page, inp.output_dir or None, log)
+        if warns:
+            res.reason = f"경고 {warns}건(확인 필요) / "
+    except Exception as e:  # noqa: BLE001
+        log(f"[i] (홈택스) 경고 확인 중 예외(계속): {str(e)[:60]}")
+
     if not inp.auto_submit:
         log("[i] (홈택스) 검증 완료. auto_submit=False → 제출은 사람이 직접.")
         res.ok = True
@@ -60,5 +69,5 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     # 4) 제출하러 가기 → 전자파일 제출하기 → 제출확인 → 접수증 '닫기' (실제·비가역)
     ok = await H.submit_filing(page, log)
     res.ok = ok
-    res.reason = "제출 완료" if ok else "제출 실패"
+    res.reason = (res.reason or "") + ("제출 완료" if ok else "제출 실패")
     return res
