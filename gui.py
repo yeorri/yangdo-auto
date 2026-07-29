@@ -441,6 +441,8 @@ class App:
         self.session: BrowserSession | None = None
         self._run_fut = None   # 실행 중인 asyncio task — 중단 시 즉시 취소용
         self._busy = False
+        self._napbu_skip_flag = False    # [지금 출력] 눌림
+        self._napbu_extend_sec = 0       # [+1분] 누적(초)
         self._stop = False
         self._phase_vars: dict[str, tk.BooleanVar] = {}
         self._phase_pills: dict[str, Pill] = {}
@@ -532,6 +534,13 @@ class App:
         self.start_btn = RButton(footer, "▶  시작", self._start, kind="primary", bg=BG, width=130)
         self.start_btn.pack(side="left")
         RButton(footer, "■  중단", self._stop_clicked, kind="ghost", bg=BG, width=110).pack(side="left", padx=8)
+        # 위택스 납부서 대기 중에만 나타나는 버튼 — 가상계좌는 PDF 안 값이라 프로그램이
+        # 알 수 없어, 눈으로 확인한 사용자가 즉시 진행하거나 시간을 늘린다.
+        self._napbu_box = tk.Frame(footer, bg=BG)
+        RButton(self._napbu_box, "지금 출력", self._napbu_skip, kind="primary", bg=BG,
+                width=90, height=34, font=(FONT, 9, "bold")).pack(side="left")
+        RButton(self._napbu_box, "+1분", self._napbu_extend, kind="ghost", bg=BG,
+                width=64, height=34, font=(FONT, 9, "bold")).pack(side="left", padx=6)
         self.status_var = tk.StringVar(value="대기 중")
         tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTE,
                  font=(FONT, 9)).pack(side="right", pady=4)
@@ -937,11 +946,11 @@ class App:
         opt.pack(fill="x", padx=16, pady=(2, 12))
 
         self.var_mode = tk.StringVar(value="pdf")
-        self.var_incname = tk.BooleanVar(value=False)
+        self.var_incname = tk.BooleanVar(value=True)
         self.var_disclose = tk.BooleanVar(value=True)
-        self.var_merge = tk.BooleanVar(value=False)
-        self.var_del_src = tk.BooleanVar(value=False)
-        self.var_napbu_wait = tk.StringVar(value="3")
+        self.var_merge = tk.BooleanVar(value=True)
+        self.var_del_src = tk.BooleanVar(value=True)
+        self.var_napbu_wait = tk.StringVar(value="1")
 
         seg = tk.Frame(opt, bg=CARD)
         seg.pack(fill="x", pady=(0, 4))
@@ -1097,6 +1106,9 @@ class App:
             merge_docs=self.var_merge.get(),
             delete_merged_sources=self.var_del_src.get(),
             napbu_wait_sec=self._napbu_wait_seconds(),
+            # 대기 중 사용자 개입 — 누른 즉시 한 번만 소비되도록 아래에서 플래그를 리셋
+            napbu_skip_check=self._consume_napbu_skip,
+            napbu_extend_check=self._consume_napbu_extend,
         ) for i, pv in enumerate(active, 1)]
 
         # 사람마다 실행할 단계 = 단계 토글 ON × 그 사람 셀 체크 ON
@@ -1137,6 +1149,28 @@ class App:
         self._busy = True
         self._run_fut = asyncio.run_coroutine_threadsafe(main(), self.session_loop)
 
+    def _consume_napbu_skip(self) -> bool:
+        """대기 루프가 호출 — [지금 출력]이 눌렸으면 True(한 번 쓰고 리셋)."""
+        if self._napbu_skip_flag:
+            self._napbu_skip_flag = False
+            return True
+        return False
+
+    def _consume_napbu_extend(self) -> int:
+        """대기 루프가 호출 — [+1분] 누적분을 넘기고 비운다."""
+        sec, self._napbu_extend_sec = self._napbu_extend_sec, 0
+        return sec
+
+    def _napbu_skip(self):
+        """대기 중 [지금 출력] — 가상계좌를 눈으로 확인했을 때 남은 대기를 건너뛴다."""
+        self._napbu_skip_flag = True
+        self._append_log("[i] 위택스 납부서 — 즉시 출력 요청")
+
+    def _napbu_extend(self):
+        """대기 중 [+1분] — 아직 안 떴을 때 대기를 연장한다."""
+        self._napbu_extend_sec += 60
+        self._append_log("[i] 위택스 납부서 대기 +60초 연장 요청")
+
     def _stop_clicked(self):
         self._stop = True
         if self._run_fut is not None and not self._run_fut.done():
@@ -1155,6 +1189,19 @@ class App:
                     self._set_phase(evt["key"], evt["status"], evt.get("person"))
                 elif kind == "status":
                     self.status_var.set(evt.get("text", ""))
+                elif kind == "napbu_wait":
+                    st = evt.get("state")
+                    if st == "start":
+                        self._napbu_skip_flag = False
+                        self._napbu_extend_sec = 0
+                        self._napbu_box.pack(side="left", padx=10)
+                        self.status_var.set(f"가상계좌 대기 {evt.get('total', 0)}초")
+                    elif st == "tick":
+                        self.status_var.set(
+                            f"가상계좌 대기 {evt.get('elapsed', 0)}/{evt.get('total', 0)}초")
+                    else:
+                        self._napbu_box.pack_forget()
+                        self.status_var.set("실행 중…")
                 elif kind == "done":
                     self._busy = False
                     self.status_var.set("완료 — 다음 건 입력 후 바로 시작 가능 (브라우저 유지)")

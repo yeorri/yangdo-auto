@@ -23,7 +23,11 @@ class Inputs:
     include_name: bool = False          # 서류 파일명에 성명 포함(공동명의 등)
     merge_docs: bool = False            # 접수증+신고서들 PDF 병합([접수증&신고서]) 여부
     delete_merged_sources: bool = False  # 병합 성공 시 개별 접수증·신고서 원본 삭제
-    napbu_wait_sec: int = 180           # 위택스 납부서 출력 전 가상계좌 생성 대기(초)
+    napbu_wait_sec: int = 60            # 위택스 납부서 출력 전 가상계좌 생성 대기(초)
+    # 대기 중 사용자 개입용 콜백(GUI가 주입). 가상계좌는 PDF 문서 안 값이라 프로그램이
+    # 생성 여부를 알 수 없어, 눈으로 확인한 사용자가 즉시 진행/연장을 지시한다.
+    napbu_skip_check: object = None      # () -> bool  : True면 남은 대기를 건너뜀
+    napbu_extend_check: object = None    # () -> int   : 반환한 초만큼 대기 연장
 
 
 @dataclass
