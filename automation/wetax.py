@@ -220,13 +220,21 @@ async def _oz_save_pdf(oz, target, log=print) -> bool:
     from pathlib import Path as _P
     target = _P(target)
     # 1) 저장 아이콘 클릭 (인쇄 아이콘과 혼동 금지 — 클래스로 정확히 지정)
+    # ⚠ 뷰어(OZ)는 로딩이 느릴 수 있어 '한 번만' 찾으면 놓친다 — 등장할 때까지 폴링.
+    #   (대기 없이 1회만 시도해 저장 실패 → 인쇄 폴백도 실패하던 원인)
+    try:
+        await oz.wait_for_function(
+            "() => !!document.querySelector('input.btnSAVEAS, .btnSAVEAS')", timeout=20000)
+    except Exception:
+        log("  [!] (위택스) OZ 저장 아이콘(btnSAVEAS)이 20초 안에 나타나지 않음")
+        return False
     opened = await oz.evaluate("""() => {
         const el = document.querySelector('input.btnSAVEAS, .btnSAVEAS');
         if (!el) return false;
         el.click(); return true;
     }""")
     if not opened:
-        log("  [!] (위택스) OZ 저장 아이콘(btnSAVEAS) 못 찾음")
+        log("  [!] (위택스) OZ 저장 아이콘(btnSAVEAS) 클릭 실패")
         return False
     # 2) 내보내기 창 등장 대기(파일형식 select)
     try:
@@ -285,9 +293,19 @@ async def _oz_print(oz, target, log=print, save: bool = True) -> bool:
             return True
         log("  [i] (위택스) 다운로드 저장 실패 — 인쇄 방식으로 폴백")
     clicked = False
-    for _ in range(17):   # 최대 ~5초
+    for _ in range(34):   # 최대 ~10초 (뷰어 로딩이 느린 PC 대비)
+        # OZ 툴바는 텍스트·alt 없는 아이콘이라 텍스트 매칭만으론 못 찾는 경우가 있다
+        # → 클래스(btnPRINT 등)로도 시도.
         if await _click_text_js(oz, "인쇄"):
             clicked = True
+            break
+        clicked = await oz.evaluate("""() => {
+            const el = document.querySelector(
+                'input.btnPRINT, .btnPRINT, input[class*="PRINT"], input[class*="print"]');
+            if (!el) return false;
+            el.click(); return true;
+        }""")
+        if clicked:
             break
         await oz.wait_for_timeout(300)
     if not clicked:
@@ -375,7 +393,12 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
                     }
                 }""", has_y)
             oz = await info.value
-            await oz.wait_for_timeout(500)   # _oz_print가 인쇄 버튼 등장을 폴링
+            # 뷰어 문서가 로드될 때까지 대기(느린 PC 대비). 버튼 등장은 _oz_print가 폴링.
+            try:
+                await oz.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            await oz.wait_for_timeout(500)
             tgt = pdf_dir / fname
             if await _oz_print(oz, tgt, log, save=save):
                 result["saved"].append(fname)
