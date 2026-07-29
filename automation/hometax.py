@@ -211,12 +211,29 @@ async def verify_and_wait(page, log=print, timeout: int = 150) -> str:
     return "시간초과"
 
 
-async def _click_modal_confirm(page, must_contain: str, log=print) -> bool:
+async def _click_modal_confirm(page, must_contain: str, log=print,
+                               timeout: float = 4.0) -> bool:
     """텍스트에 must_contain이 든 보이는 WebSquare 모달의 '확인'을 클릭.
 
     프레임당 JS 한 번으로 탐색+클릭(요소별 await 왕복 제거 — 수 초 → 수십 ms).
-    JS 클릭은 WebSquare 모달에서 검증된 방식(vat: '모달 내 전부 JS 클릭').
+    ⚠ 모달은 조금 늦게 뜰 수 있어 등장을 폴링한다. 1회만 확인하면 놓치고, 그 모달이
+      화면을 덮은 채 남아 다음 클릭이 전부 실패한다(부속서류 '첨부하기' 타임아웃의 원인).
+      모달이 아예 없는 경우도 정상이므로 timeout 후 False를 돌려준다.
     """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while True:
+        if await _try_click_modal_confirm(page, must_contain):
+            log(f"[i] (홈택스) 모달 '확인' ({must_contain})")
+            await page.wait_for_timeout(400)
+            return True
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(0.3)
+
+
+async def _try_click_modal_confirm(page, must_contain: str) -> bool:
+    """모달 '확인'을 1회 탐색·클릭(폴링은 호출측 담당)."""
     for frame in page.frames:
         try:
             clicked = await frame.evaluate("""(mustContain) => {
@@ -238,8 +255,6 @@ async def _click_modal_confirm(page, must_contain: str, log=print) -> bool:
         except Exception:
             continue
         if clicked:
-            log(f"[i] (홈택스) 모달 '확인' ({must_contain})")
-            await page.wait_for_timeout(400)
             return True
     return False
 
@@ -387,19 +402,22 @@ async def _fill_rrn(page, rrn: str, log=print) -> bool:
         log(f"[!] (홈택스) 주민번호 13자리 아님: {len(digits)}")
         return False
     front, back = digits[:6], digits[6:]
-    for frame in page.frames:
-        try:
-            f6 = frame.locator("input[maxlength='6']")
-            b7 = frame.locator("input[maxlength='7']")
-            f6v = [f6.nth(i) for i in range(await f6.count()) if await f6.nth(i).is_visible()]
-            b7v = [b7.nth(i) for i in range(await b7.count()) if await b7.nth(i).is_visible()]
-            if f6v and b7v:
-                await f6v[0].fill(front)
-                await b7v[0].fill(back)
-                log(f"[i] (홈택스) 주민번호 입력 {front}-*******")
-                return True
-        except Exception:
-            continue
+    # 모달·입력칸이 늦게 렌더될 수 있어 등장할 때까지 폴링(1회 순회는 놓치는 원인)
+    for _ in range(20):        # 최대 ~8초
+        for frame in page.frames:
+            try:
+                f6 = frame.locator("input[maxlength='6']")
+                b7 = frame.locator("input[maxlength='7']")
+                f6v = [f6.nth(i) for i in range(await f6.count()) if await f6.nth(i).is_visible()]
+                b7v = [b7.nth(i) for i in range(await b7.count()) if await b7.nth(i).is_visible()]
+                if f6v and b7v:
+                    await f6v[0].fill(front)
+                    await b7v[0].fill(back)
+                    log(f"[i] (홈택스) 주민번호 입력 {front}-*******")
+                    return True
+            except Exception:
+                continue
+        await page.wait_for_timeout(400)
     log("[!] (홈택스) 주민번호 입력칸 못 찾음")
     return False
 
@@ -438,12 +456,13 @@ async def query_and_open_attach(ctx, page, rrn: str, log=print):
         except Exception as e:
             log(f"[!] (홈택스) 조회 클릭 실패: {str(e)[:60]}")
             return None
-    await page.wait_for_timeout(2500)
-    await _click_modal_confirm(page, must_contain="완료", log=log)  # '조회가 완료되었습니다'
-    await page.wait_for_timeout(800)
+    # 조회 완료 알림 — 뜰 때까지 폴링(고정 대기 대신). 모달이 남아 있으면 아래 클릭이 막힌다.
+    await page.wait_for_timeout(600)
+    await _click_modal_confirm(page, must_contain="완료", log=log, timeout=8.0)
     try:
-        async with ctx.expect_page(timeout=10000) as info:
-            await page.get_by_text("첨부하기", exact=True).first.click(timeout=6000)
+        # '첨부하기'는 조회 결과 행이 그려진 뒤에 나타난다 — locator가 자동 대기(12초)
+        async with ctx.expect_page(timeout=15000) as info:
+            await page.get_by_text("첨부하기", exact=True).first.click(timeout=12000)
         popup = await info.value
         await popup.wait_for_timeout(2000)
         log("[v] (홈택스) 부속서류 첨부 팝업 열림")
