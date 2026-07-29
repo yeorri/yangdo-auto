@@ -415,7 +415,9 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("양도소득세 신고 자동화")
-        root.geometry("1120x1000")
+        # 높이: 신고인이 많아 가로 스크롤바(단계·입력)가 둘 다 생겨도 세로 스크롤이
+        # 안 나도록 여유를 둔 값. 화면이 작으면 사용자가 줄일 수 있다(minsize).
+        root.geometry("1120x1020")
         root.minsize(1000, 820)
         root.configure(bg=BG)
 
@@ -555,9 +557,10 @@ class App:
         vsb = ttk.Scrollbar(scroll, orient="vertical", command=canvas.yview)
         body = tk.Frame(canvas, bg=BG)
         win = canvas.create_window((0, 0), window=body, anchor="nw")
-        canvas.configure(yscrollcommand=vsb.set)
+        self._vsb = vsb
+        canvas.configure(yscrollcommand=self._on_yscroll)
         canvas.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        # 세로 스크롤바는 내용이 넘칠 때만 표시(_on_yscroll) — 평소엔 안 보이게
         body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
         canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
@@ -609,7 +612,7 @@ class App:
         # 왼쪽: 단계 라벨(토글·배지·이름) — 가로 스크롤해도 고정.
         # ⚠ width를 반드시 지정 — pack_propagate(False)라 미지정 시 부모 폭을 다 먹어
         #   오른쪽 셀 캔버스와 겹치고 스크롤 판정이 깨진다.
-        left = tk.Frame(body, bg=CARD, width=250, height=h)
+        left = tk.Frame(body, bg=CARD, width=236, height=h)   # 가장 긴 단계명(166px)+토글+여백
         left.pack(side="left", anchor="n")
         left.pack_propagate(False)
         tk.Frame(left, bg=CARD, height=self.MHEAD_H).pack(fill="x")   # 헤더 자리 맞춤
@@ -621,13 +624,12 @@ class App:
             self._phase_vars[mod.KEY] = var
             var.trace_add("write", lambda *a, k=mod.KEY: self._sync_row_enabled(k))
             Toggle(row, var, CARD).pack(side="left")
+            # 사이트 배지는 뺌 — 단계명에 이미 '위택스/홈택스'가 들어 있어 중복이고,
+            # 그 자리를 단계명에 줘야 잘리지 않는다. 대신 글자색으로 사이트를 구분.
             site = getattr(mod, "SITE", "")
-            if site in SITE_BADGE:
-                bgc, fgc = SITE_BADGE[site]
-                tk.Label(row, text=site, bg=bgc, fg=fgc, font=(FONT, 8, "bold"),
-                         padx=6, pady=1).pack(side="left", padx=(10, 6))
-            tk.Label(row, text=f"{i}. {mod.LABEL}", bg=CARD, fg=INK,
-                     font=(FONT, 9)).pack(side="left")
+            fg = SITE_BADGE.get(site, (None, INK))[1]
+            tk.Label(row, text=f"{i}. {mod.LABEL}", bg=CARD, fg=fg,
+                     font=(FONT, 9)).pack(side="left", padx=(10, 0))
 
         # 오른쪽: 신고인별 셀 — 사람이 많으면 가로 스크롤(스크롤바는 넘칠 때만)
         right = tk.Frame(body, bg=CARD)
@@ -650,6 +652,17 @@ class App:
             holder.pack(fill="x")
             holder.pack_propagate(False)
             self._phase_rows[mod.KEY] = holder
+
+    def _on_yscroll(self, first, last):
+        """중앙 영역 — 내용이 넘칠 때만 세로 스크롤바 표시."""
+        self._vsb.set(first, last)
+        try:
+            if float(first) <= 0.0 and float(last) >= 1.0:
+                self._vsb.pack_forget()
+            elif not self._vsb.winfo_ismapped():
+                self._vsb.pack(side="right", fill="y")
+        except Exception:
+            pass
 
     def _on_mxscroll(self, first, last):
         """실행 단계 셀 영역 — 넘칠 때만 가로 스크롤바 표시."""
