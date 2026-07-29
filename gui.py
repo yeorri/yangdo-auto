@@ -415,10 +415,14 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("양도소득세 신고 자동화")
-        # 높이: 신고인이 많아 가로 스크롤바(단계·입력)가 둘 다 생겨도 세로 스크롤이
-        # 안 나도록 여유를 둔 값. 화면이 작으면 사용자가 줄일 수 있다(minsize).
-        root.geometry("1120x1020")
-        root.minsize(1000, 820)
+        # 창 크기·위치 — 화면에 들어가는 선에서 최대로 잡고 가운데 배치.
+        # (고정 높이로 두면 작업표시줄·타이틀바 때문에 아래가 잘려 매번 옮겨야 했음)
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w = min(1120, sw - 80)
+        # 980 = 헤더 86 + 카드 ~672 + 로그 ~136 + 푸터 ~80 (내용에 맞춘 값 — 빈 여백 최소)
+        h = min(980, sh - 100)           # 작업표시줄 + 타이틀바 여유
+        root.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
+        root.minsize(1000, 720)
         root.configure(bg=BG)
 
         style = ttk.Style()
@@ -538,7 +542,7 @@ class App:
         tk.Label(logwrap, text="실행 로그", bg=BG, fg=MUTE, font=(FONT, 9, "bold")).pack(anchor="w", pady=(0, 4))
         lt = tk.Frame(logwrap, bg=CONSOLE_BG, highlightbackground=BORDER, highlightthickness=1)
         lt.pack(fill="both")
-        self.log_text = tk.Text(lt, height=6, wrap="word", bg=CONSOLE_BG, fg=CONSOLE_FG,
+        self.log_text = tk.Text(lt, height=5, wrap="word", bg=CONSOLE_BG, fg=CONSOLE_FG,
                                 relief="flat", font=(MONO, 9), insertbackground=CONSOLE_FG,
                                 padx=12, pady=8, borderwidth=0)
         self.log_text.pack(side="left", fill="both", expand=True)
@@ -550,7 +554,7 @@ class App:
         self.log_text.tag_config("info", foreground="#7DD3FC")
         self.log_text.tag_config("accent", foreground="#A5B4FC")
 
-        # 중앙 — 스크롤 영역
+        # 중앙 — 스크롤 영역(카드들). 창 높이를 내용에 맞춰 잡으므로 평소엔 스크롤이 없다.
         scroll = tk.Frame(self.root, bg=BG)
         scroll.pack(fill="both", expand=True, side="top")
         canvas = tk.Canvas(scroll, bg=BG, highlightthickness=0)
