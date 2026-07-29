@@ -785,23 +785,50 @@ async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
         b = await p.locator("body").inner_text(timeout=2000)
         return "공개여부" in b or "개인정보가 공개된" in b
 
-    found = await wait_page(ctx, _is_popup, timeout=10)
-    for p in ([found] if found else []):
-        for frame in p.frames:
-            try:
-                lab = frame.get_by_text(target, exact=True).first
-                if await lab.count() and await lab.is_visible():
-                    await lab.click(timeout=3000)
-            except Exception:
-                pass
-            try:
-                aply = frame.get_by_text("적용", exact=True).first
-                if await aply.count() and await aply.is_visible():
-                    await aply.click(timeout=3000)
-                    log(f"[i] (홈택스) 개인정보 {('공개' if disclose else '비공개')} 적용")
-                    return True
-            except Exception:
-                pass
+    found = await wait_page(ctx, _is_popup, timeout=12)
+    if found is None:
+        log("[!] (홈택스) 개인정보 공개여부 팝업을 찾지 못함 — 기본값(비공개)로 출력될 수 있음")
+        return False
+    # 라디오는 라벨 클릭이 먹지 않을 때가 있어 JS로 input을 직접 선택하고 change를 발화.
+    for frame in found.frames:
+        try:
+            ok = await frame.evaluate("""(want) => {
+                const vis = el => { const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0; };
+                // 1) 라디오 선택: 라벨 텍스트가 want인 input[type=radio]
+                let picked = false;
+                for (const inp of document.querySelectorAll('input[type=radio]')) {
+                    let txt = '';
+                    if (inp.id) {
+                        const l = document.querySelector('label[for="' + inp.id + '"]');
+                        if (l) txt = l.innerText || '';
+                    }
+                    if (!txt && inp.parentElement) txt = inp.parentElement.innerText || '';
+                    if (txt.replace(/\\s+/g, '').includes(want.replace(/\\s+/g, ''))) {
+                        inp.click();
+                        if (!inp.checked) { inp.checked = true; }
+                        inp.dispatchEvent(new Event('change', {bubbles: true}));
+                        picked = true;
+                        break;
+                    }
+                }
+                // 2) [적용] 클릭
+                for (const el of document.querySelectorAll(
+                        'a, button, input[type=button], input[type=submit]')) {
+                    if (!vis(el)) continue;
+                    const t = ((el.innerText || el.value || '') + '').trim();
+                    if (t === '적용') { el.click(); return picked ? 'ok' : 'apply-only'; }
+                }
+                return picked ? 'picked-no-apply' : 'none';
+            }""", target)
+        except Exception:
+            continue
+        if ok in ("ok", "apply-only"):
+            log(f"[i] (홈택스) 개인정보 {('공개' if disclose else '비공개')} 적용"
+                + ("" if ok == "ok" else " (라디오 미확인)"))
+            await found.wait_for_timeout(800)
+            return True
+    log("[!] (홈택스) 개인정보 공개여부 [적용] 클릭 실패")
     return False
 
 
@@ -811,12 +838,18 @@ async def wait_page(ctx, pred, timeout: float = 15.0, interval: float = 0.4):
     ⚠ 창을 '한 번만' 찾으면 느린 PC·네트워크에서 아직 안 뜬 창을 놓쳐 그대로 실패한다
     (라이브에서 실제 발생) — 출력 관련 창 탐색은 반드시 이 함수를 쓸 것.
     """
+    import inspect
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout
     while True:
         for p in list(ctx.pages):
             try:
-                if await pred(p):
+                r = pred(p)
+                # ⚠ pred는 동기(lambda)일 수도, async일 수도 있다. 동기 결과를 await 하면
+                #   TypeError가 나고 except에 삼켜져 '영원히 못 찾음'이 된다(실제 버그였음).
+                if inspect.isawaitable(r):
+                    r = await r
+                if r:
                     return p
             except Exception:
                 continue
@@ -982,6 +1015,7 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
     report = await wait_page(ctx, lambda p: "clipreport" in (p.url or ""), timeout=15)
     if report is None:
         log("[!] (홈택스) 접수증 창(clipreport)이 뜨지 않음")
+        result["failed"].append("[접수증]")
     if report:
         await report.wait_for_timeout(400)   # _clipreport_print가 데이터 로드를 따로 대기
         sc = await _clipreport_scope(report)
@@ -1116,10 +1150,25 @@ async def print_napbu(ctx, page, pdf_dir, label: str = "", output_mode: str = "p
     log(f"[i] (홈택스) 납부서 {n}건 (납부기한 {dues})")
     for i in range(n):
         try:
-            async with ctx.expect_page(timeout=8000) as info:
-                await page.locator("img[alt='납부서']").nth(i).click(timeout=5000)
-            win = await info.value
-            await win.wait_for_timeout(1500)
+            # ⚠ WebSquare는 같은 popupID 창을 재사용한다 → 이미 열린 clipreport 창이
+            #   있으면 '새 page 이벤트'가 발생하지 않아 expect_page가 타임아웃난다
+            #   ('새 창 없음 ≠ 팝업 없음'). 그 경우 기존 창을 찾아서 쓴다.
+            before = set(ctx.pages)
+            win = None
+            try:
+                async with ctx.expect_page(timeout=10000) as info:
+                    await page.locator("img[alt='납부서']").nth(i).click(timeout=8000)
+                win = await info.value
+            except Exception:
+                win = await wait_page(
+                    ctx, lambda p: "clipreport" in (p.url or "") and p not in before, timeout=3)
+                if win is None:   # 재사용된 창(이미 before에 있던 것)까지 허용
+                    win = await wait_page(
+                        ctx, lambda p: "clipreport" in (p.url or ""), timeout=3)
+                if win is None:
+                    raise RuntimeError("납부서 창을 찾지 못함(새 창·재사용 창 모두 없음)")
+                log("  [i] (홈택스) 새 창 대신 기존 납부서 창 재사용")
+            await win.wait_for_timeout(800)
             sc = await _clipreport_scope(win)
             due = pdf_save.fmt_due(dues[i] if i < len(dues) else "")
             tgt = pdf_dir / pdf_save.doc_name("납부서", ["양도소득세", due], include_name, label)
