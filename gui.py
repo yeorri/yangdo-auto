@@ -32,6 +32,7 @@ import asyncio
 import json
 import queue
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -486,6 +487,8 @@ class App:
         # 설정에 저장하지 않는다: 켠 채로 잊고 다음 날 그대로 도는 것이 가장 위험하다.
         self.var_attach_fix = tk.BooleanVar(value=False)
         self._attach_fix_chk = None
+        self._run_started: float | None = None   # 시작 누른 시각(monotonic)
+        self._elapsed_txt = ""                   # 마지막으로 표시한 경과 문자열
 
         # 검증(_missing)이 참조하므로 _build_ui 전에 설정.
         self._browsers_ready = browser_setup.browsers_ready()
@@ -584,6 +587,11 @@ class App:
         self.status_var = tk.StringVar(value="대기 중")
         tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTE,
                  font=(FONT, 9)).pack(side="right", pady=4)
+        # 경과 시간 — 상태 문구는 '가상계좌 대기' 등으로 계속 바뀌므로 별도 칸에 둔다.
+        # 고정폭 글꼴이라 숫자가 바뀌어도 라벨이 흔들리지 않는다.
+        self.elapsed_var = tk.StringVar(value="")
+        tk.Label(footer, textvariable=self.elapsed_var, bg=BG, fg=INK,
+                 font=(MONO, 10, "bold")).pack(side="right", padx=(0, 14), pady=4)
         self.hint_var = tk.StringVar()
         tk.Label(footer, textvariable=self.hint_var, bg=BG, fg="#B45309",
                  font=(FONT, 9), wraplength=420, justify="left").pack(side="left", padx=14)
@@ -1179,6 +1187,9 @@ class App:
                 cell.set_status("idle")     # 이번에 돌릴 칸만 초기화(완료 이력은 유지)
         self.log_text.delete("1.0", "end")
         self.status_var.set("실행 중…")
+        self._run_started = time.monotonic()
+        self._elapsed_txt = ""
+        self.elapsed_var.set("0:00")
 
         def emit(kind, **kw):
             self.events.put({"kind": kind, **kw})
@@ -1225,6 +1236,9 @@ class App:
         self._stop = True
         if self._run_fut is not None and not self._run_fut.done():
             self._run_fut.cancel()   # 실행 중인 태스크 즉시 취소 (await 지점에서 끊김)
+        # 여기서 시계를 세운다 — 취소가 코루틴 시작 전에 걸리면 'done'이 영영 안 와서
+        # 타이머만 계속 돌 수 있다. 뒤늦게 done이 와도 두 번 세지 않는다(_run_started=None).
+        self._finish_elapsed()
         self.status_var.set("중단됨")
 
     # ── 큐 폴링 ──
@@ -1254,10 +1268,41 @@ class App:
                         self.status_var.set("실행 중…")
                 elif kind == "done":
                     self._busy = False
+                    self._finish_elapsed()
                     self.status_var.set("완료 — 다음 건 입력 후 바로 시작 가능 (브라우저 유지)")
         except queue.Empty:
             pass
+        self._tick_elapsed()
         self.root.after(100, self._poll)
+
+    # ── 경과 시간 ──
+    @staticmethod
+    def _fmt_elapsed(sec: int) -> str:
+        """0:07 / 4:12 / 1:02:30"""
+        if sec >= 3600:
+            return f"{sec // 3600}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
+        return f"{sec // 60}:{sec % 60:02d}"
+
+    def _tick_elapsed(self):
+        """시작 후 경과 시간 갱신. _poll(100ms)에 얹어 별도 타이머를 만들지 않는다
+        (after 잡을 따로 돌리면 중단·종료 때 취소 관리가 하나 더 늘어난다).
+        표시 문자열이 바뀔 때만 set — 초당 1회만 실제로 갱신된다."""
+        if self._run_started is None or not self._busy:
+            return
+        txt = self._fmt_elapsed(int(time.monotonic() - self._run_started))
+        if txt != self._elapsed_txt:
+            self._elapsed_txt = txt
+            self.elapsed_var.set(txt)
+
+    def _finish_elapsed(self):
+        """종료 시점의 값으로 고정하고 총 소요를 로그에 남긴다(다음 시작 때 초기화)."""
+        if self._run_started is None:
+            return
+        sec = int(time.monotonic() - self._run_started)
+        self.elapsed_var.set(self._fmt_elapsed(sec))
+        self._append_log(f"[i] 총 소요 시간 {self._fmt_elapsed(sec)}"
+                         f" ({sec // 60}분 {sec % 60}초)")
+        self._run_started = None
 
     def _append_log(self, text: str):
         tag = ""
