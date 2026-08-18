@@ -486,63 +486,69 @@ async def query_and_open_attach(ctx, page, rrn: str, log=print):
 SUBMITTED_LIST_TITLE = "부속서류 제출목록"
 
 
-def _list_modal(page, title: str = SUBMITTED_LIST_TITLE):
-    """제출목록 모달 locator. 바깥의 '신고 부속·증빙서류 제출' 모달과 섞이지 않게
-    제목 텍스트로 좁힌다(둘 다 .w2window라 클래스만으로는 구분 불가)."""
-    return page.locator(".w2window:visible").filter(has_text=title).last
+# ⚠ 탐색부터 클릭까지 **frame당 JS 한 번**으로 끝낸다. WebSquare는 input 위에 꾸밈 요소를
+#   덮어두기 때문에 Playwright click()이 actionability 검사에 실패해 스크롤을 반복 시도하고,
+#   그게 화면이 위아래로 흔들리는 원인이다(ingunbi_auto jigup_submit에서 같은 방식으로 해결).
+#   scrollIntoView는 딱 한 번만 부른다.
+_LIST_MODAL_JS = """(arg) => {
+    const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+        return r.width > 1 && r.height > 1 && s.display !== 'none' && s.visibility !== 'hidden'; };
+    const wins = [...document.querySelectorAll('.w2window')].filter(vis)
+        .filter(w => ((w.innerText || '')).includes(arg.title));
+    const m = wins[wins.length - 1];
+    if (!m) return null;                       // 이 frame엔 제출목록 모달이 없음
+    const radios = [...m.querySelectorAll('input[type=radio]')].filter(vis);
+    if (arg.action === 'count') return radios.length;
+    if (arg.action === 'select') {
+        const r = radios[0];
+        if (!r) return false;
+        r.scrollIntoView({block: 'center'});
+        if (!r.checked) r.click();
+        return !!r.checked;
+    }
+    if (arg.action === 'click') {
+        for (const el of m.querySelectorAll(
+                'a, button, input[type=button], input[type=submit]')) {
+            if (!vis(el)) continue;
+            if (((el.innerText || el.value || '') + '').trim() !== arg.text) continue;
+            el.scrollIntoView({block: 'center'});
+            el.click();
+            return true;
+        }
+        return false;
+    }
+    return null;
+}"""
+
+
+async def _list_modal_js(page, action: str, text: str = "",
+                         title: str = SUBMITTED_LIST_TITLE):
+    """제출목록 모달에 대해 JS 한 번으로 count/select/click 수행. 모달 없으면 None."""
+    arg = {"action": action, "text": text, "title": title}
+    for frame in page.frames:
+        try:
+            r = await frame.evaluate(_LIST_MODAL_JS, arg)
+        except Exception:
+            continue
+        if r is not None:
+            return r
+    return None
 
 
 async def _submitted_count(page) -> int:
     """제출목록에 남은 부속서류 건수(행마다 선택 라디오 1개). 모달이 없으면 -1."""
-    try:
-        m = _list_modal(page)
-        if await m.count() == 0:
-            return -1
-        return await m.locator("input[type=radio]").count()
-    except Exception:
-        return -1
+    r = await _list_modal_js(page, "count")
+    return -1 if r is None else int(r)
 
 
 async def _select_first_submitted(page) -> bool:
-    """제출목록 첫 행의 선택 라디오를 켠다. 라디오 → 강제클릭 → 셀 → JS 순으로 물러난다.
-
-    ⚠ WebSquare 라디오를 JS로 먼저 만지면 화면이 다시 그려지며 참조가 틀어진 전례가
-      있다(개인정보 공개여부 회귀) → Playwright 클릭을 우선하고 JS는 최후 수단.
-    """
-    radio = _list_modal(page).locator("input[type=radio]").first
-    attempts = (
-        lambda: radio.click(timeout=3000),
-        lambda: radio.click(timeout=3000, force=True),
-        lambda: radio.locator("xpath=ancestor::td[1]").click(timeout=3000),
-    )
-    for act in attempts:
-        try:
-            await act()
-            if await radio.is_checked():
-                return True
-        except Exception:
-            continue
-    try:
-        await radio.evaluate(
-            "el => { el.click(); el.dispatchEvent(new Event('change', {bubbles:true})); }")
-        return await radio.is_checked()
-    except Exception:
-        return False
+    """제출목록 첫 행의 선택 라디오를 켠다(JS 1회 — 스크롤 흔들림 없음)."""
+    return bool(await _list_modal_js(page, "select"))
 
 
 async def _click_in_list_modal(page, text: str) -> bool:
-    """제출목록 모달 안에서 텍스트가 정확히 일치하는 버튼 클릭(input value도 시도)."""
-    m = _list_modal(page)
-    try:
-        await m.get_by_text(text, exact=True).first.click(timeout=5000)
-        return True
-    except Exception:
-        pass
-    try:
-        await m.locator(f"input[value='{text}']").first.click(timeout=3000)
-        return True
-    except Exception:
-        return False
+    """제출목록 모달 안에서 텍스트가 정확히 일치하는 버튼 클릭(JS 1회)."""
+    return bool(await _list_modal_js(page, "click", text))
 
 
 async def open_submitted_list(page, rrn: str, log=print) -> bool:
@@ -597,9 +603,13 @@ async def delete_submitted_attachments(page, log=print, max_rounds: int = 20) ->
         if not await _click_in_list_modal(page, "선택한 부속서류 삭제"):
             log("[!] (홈택스) [선택한 부속서류 삭제] 버튼 못 찾음")
             return removed if removed else -1
-        # 삭제 확인 모달이 뜨는 경우(있으면) → 이어서 '정상 삭제 되었습니다' 알림.
+        # 삭제 확인 모달이 뜨는 경우(있으면) → '정상 삭제 되었습니다' 알림.
         await _click_modal_confirm(page, must_contain="하시겠습니까", log=log, timeout=2.0)
         await _click_modal_confirm(page, must_contain="삭제", log=log, timeout=10.0)
+        # ⚠ 삭제 뒤 목록이 새로고침되며 **'조회가 완료되었습니다' 알림이 한 번 더** 뜬다.
+        #   '삭제'가 안 들어간 문구라 위 확인에 안 걸린다 → 따로 닫아야 한다.
+        #   안 닫으면 알림이 모달을 덮은 채 남아 [닫기]와 다음 클릭이 전부 막힌다.
+        await _click_modal_confirm(page, must_contain="완료", log=log, timeout=8.0)
         for _ in range(15):             # 목록이 줄어들 때까지 최대 6초
             await page.wait_for_timeout(400)
             if 0 <= await _submitted_count(page) < n:
@@ -611,6 +621,8 @@ async def delete_submitted_attachments(page, log=print, max_rounds: int = 20) ->
         log(f"[v] (홈택스) 기존 부속서류 삭제 {removed}건 (남은 {n - 1}건)")
     if removed:
         log(f"[v] (홈택스) 기존 부속서류 {removed}건 삭제 완료")
+    # 남아 있는 알림이 있으면 먼저 치운다 — 덮여 있으면 [닫기]가 안 눌린다.
+    await _click_modal_confirm(page, must_contain="완료", log=log, timeout=2.0)
     await _click_in_list_modal(page, "닫기")
     await page.wait_for_timeout(600)
     return removed

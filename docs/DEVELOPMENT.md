@@ -117,13 +117,37 @@ tools/                     검증 러너(run_submit, run_phase4/5, run_attach �
   건수가 안 줄면 즉시 중단한다(무한 반복 방지).
 - ⚠ 모달 탐색은 **제목 텍스트로 좁힌다** — 바깥 '신고 부속·증빙서류 제출'도 같은 `.w2window`라
   클래스만으로는 구분되지 않는다.
-- 라디오는 **Playwright 클릭 우선**(라디오 → force → 셀 → JS 순). JS 선행은 회귀 전례가 있다(#11).
+- ⚠ 삭제하면 알림이 **두 번** 뜬다: '정상 삭제 되었습니다' → (목록 새로고침) **'조회가 완료되었습니다'**.
+  뒤엣것은 '삭제'가 안 들어간 문구라 같은 조건으로는 안 걸린다 → 따로 닫아야 하고,
+  안 닫으면 알림이 모달을 덮은 채 남아 **[닫기]와 다음 클릭이 전부 막힌다**(라이브 확인).
+- ⚠ 라디오는 **frame당 JS 1회**로 탐색+scrollIntoView(1회)+클릭. Playwright click()을 쓰면
+  WebSquare가 input 위에 꾸밈 요소를 덮어둔 탓에 actionability 검사가 실패해
+  **스크롤을 반복 시도하고 화면이 위아래로 흔들린다**(2.10).
 - **삭제만 하고 끝나면 부속서류 없는 신고건이 남는다** → 삭제 단독 실행 단계는 만들지 않고,
   이 phase가 삭제와 재제출을 한 덩어리로 수행한다. 재제출은 `hometax_attach.run`을 그대로
   호출해 ③의 검증된 경로를 재사용(2.8의 조회 안정화·재주입 포함).
 - 삭제는 실패하면 **재제출하지 않고 중단**한다(기존 서류와 섞이면 더 나쁘다).
 - GUI 기본 **꺼짐**(`DEFAULT_ON = False`) — 되돌릴 수 없는 단계라 평소 실행에 섞이면 안 된다.
   phase 모듈에 `DEFAULT_ON`을 달면 GUI 토글 기본값이 그 값으로 잡힌다.
+
+### 2.10 화면이 위아래로 흔들릴 때 (반복 발생 — 원인은 항상 같다)
+**Playwright click()/check()의 스크롤 재시도**다. WebSquare는 `input` 위에 꾸밈 요소를 덮어두는데,
+그러면 actionability 검사(가려지지 않았는지)가 실패하고 Playwright는 **요소를 다시 스크롤해
+재시도**한다. 이걸 여러 방법으로 연달아 시도하면(라디오 → force → 부모 셀 …) 시도마다
+스크롤이 걸려 화면이 요동친다.
+
+→ **탐색부터 클릭까지 frame당 JS 한 번**으로 끝낸다. `scrollIntoView({block:'center'})`는 **1회만**.
+```js
+const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+    return r.width > 1 && r.height > 1 && s.display !== 'none' && s.visibility !== 'hidden'; };
+target.scrollIntoView({block: 'center'});   // 딱 한 번
+if (!target.checked) target.click();
+```
+적용처: `ingunbi_auto.jigup_submit`(제출 확인 체크박스), 본 프로젝트 `_LIST_MODAL_JS`(삭제 라디오),
+`_try_click_modal_confirm`(모달 확인).
+
+⚠ 단, **JS 조작 뒤에는 다른 요소의 참조가 틀어질 수 있다**(#11 — WebSquare가 화면을 다시 그린다).
+JS로 만진 다음에 누를 버튼은 **그때 새로 찾을 것**(미리 잡아둔 locator를 재사용하지 말 것).
 
 ---
 
@@ -145,6 +169,8 @@ tools/                     검증 러너(run_submit, run_phase4/5, run_attach �
 | 12 | 서류 저장 시 다른 창 쓰면 실패 | Windows 저장 다이얼로그 포커스 문제 | **다운로드 방식으로 전환**(2.1) |
 | 13 | 부속서류 첨부가 목록에서 사라짐 | 팝업 초기 목록조회(`ATTCMGAA001R03`)가 **주입보다 늦게 도착**해 그리드를 빈 서버결과로 재바인딩 | 조회가 1.5초간 조용해진 뒤 주입 + 사라지면 1회 재주입(2.8) |
 | 14 | 병합 `Permission denied` | 같은 이름 병합본을 PDF 뷰어가 열어둠 | 거부됐을 때만 시각 붙인 새 이름으로 저장 |
+| 15 | 부속서류 삭제 후 알림이 안 닫힘 | 삭제 알림 뒤에 **'조회가 완료되었습니다'가 한 번 더** — '삭제' 조건에 안 걸림 | 완료 알림도 따로 닫기(안 닫으면 [닫기]가 막힘) |
+| 16 | 라디오 찾을 때 화면이 흔들림 | Playwright click()의 **스크롤 재시도**(꾸밈 요소가 input을 덮음) | frame당 JS 1회 + scrollIntoView 1회(2.10) |
 
 **교훈**: (a) "1회만 찾고 포기"가 반복된 실패 원인 — 탐색은 폴링으로.
 (b) 그러나 **검증된 동작을 임의로 바꾸지 말 것** — JS 조작·헬퍼 도입이 회귀를 만들었다(#11).
