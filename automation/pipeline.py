@@ -27,7 +27,6 @@ SITE_SUB = {"홈택스": "hometax.go.kr", "위택스": "wetax.go.kr"}
 # 출력만 돌리는 정상 사용이므로 건너뛰지 않는다.
 DEPENDS_ON = {
     "hometax_attach": "hometax_filing",
-    "hometax_attach_fix": "hometax_filing",
     "hometax_docs": "hometax_filing",
     "hometax_napbu": "hometax_filing",
     "wetax_docs": "wetax_filing",

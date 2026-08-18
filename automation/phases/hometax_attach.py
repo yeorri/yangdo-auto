@@ -74,6 +74,36 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     if not await H.navigate_to_attach(page, log):
         res.reason = "부속서류 화면 진입 실패"
         return res
+
+    # 이미 제출된 건인지 먼저 본다 — 조회 결과의 [첨부하기] 자리에 [제출내역보기]가 뜬다.
+    # ⚠ 이 확인이 없으면 이미 제출된 건에서 [첨부하기]를 못 찾아 정체불명의 실패로 끝난다.
+    if not await H.query_attach(page, inp.seller_rrn, log):
+        res.reason = "조회 실패"
+        return res
+    removed = 0
+    if await H.attach_state(page) == "submitted":
+        if not inp.replace_attachments:
+            res.reason = "이미 부속서류가 제출된 건 — [수정]을 켜고 다시 실행하세요"
+            log(f"[!] (홈택스) {res.reason}")
+            log("[i] (홈택스) 기존 제출분을 임의로 지우지 않았습니다.")
+            return res
+        log("[i] (홈택스) 이미 제출된 건 — 기존 제출분을 지우고 다시 제출합니다(수정)")
+        if not await H.open_submitted_list(page, log):
+            res.reason = "제출내역 열기 실패 — 재제출하지 않음"
+            return res
+        removed = await H.delete_submitted_attachments(page, log)
+        if removed < 0:
+            res.reason = "기존 부속서류 삭제 실패 — 재제출하지 않음"
+            log(f"[!] (홈택스) {res.reason} (지금 제출하면 기존 서류와 섞인다)")
+            return res
+        # 전부 지우면 목록이 [첨부하기]로 돌아온다 → 처음부터 평소 경로를 탄다.
+        if stop_check and stop_check():
+            res.reason = "중단됨"
+            return res
+        if not await H.navigate_to_attach(page, log):
+            res.reason = "삭제 후 부속서류 화면 재진입 실패"
+            return res
+
     popup = await H.query_and_open_attach(ctx, page, inp.seller_rrn, log)
     if popup is None:
         res.reason = "조회/첨부 팝업 열기 실패"
@@ -87,10 +117,14 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         pass
 
     res.ok = ok
+    fixed = f"기존 {removed}건 삭제 후 " if removed else ""
     if ok and inp.auto_submit:
-        res.reason = f"부속서류 {len(files)}개 제출 완료"
+        res.reason = f"{fixed}부속서류 {len(files)}개 제출 완료"
     elif ok:
-        res.reason = f"부속서류 {len(files)}개 첨부완료(수동제출)"
+        res.reason = f"{fixed}부속서류 {len(files)}개 첨부완료(수동제출)"
     else:
-        res.reason = "부속서류 제출 실패"
+        res.reason = f"{fixed}부속서류 제출 실패" if removed else "부속서류 제출 실패"
+        if removed:
+            log("[!] (홈택스) 기존 부속서류는 지워졌으나 재제출이 실패했다 — "
+                "홈택스에서 직접 제출하거나 이 단계를 다시 실행할 것")
     return res

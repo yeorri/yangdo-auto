@@ -16,6 +16,10 @@ class Inputs:
     hometax_convert_file: str = ""      # 홈택스 양도세 변환파일
     seller_rrn: str = ""                # 양도인 주민등록번호 (부속서류용)
     attach_folder: str = ""             # 부속서류 폴더 (안의 파일 전부 첨부)
+    # 부속서류 '수정' — 이미 제출된 건이면 기존 제출분을 지우고 다시 낸다.
+    # ⚠ 되돌릴 수 없으므로 기본 꺼짐. 꺼진 상태에서 이미 제출된 건을 만나면 지우지 않고
+    #   '수정을 켜라'고 안내하며 중단한다(모르고 지우는 사고 방지).
+    replace_attachments: bool = False
     output_dir: str = ""                # PDF 저장 경로
     output_mode: str = "pdf"            # "pdf"(저장) | "print"(출력)
     auto_submit: bool = True            # 파일변환신고 제출까지 자동 여부

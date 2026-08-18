@@ -118,6 +118,42 @@ class Toggle(tk.Canvas):
             self.command()
 
 
+class MiniCheck(tk.Canvas):
+    """단계 라벨 옆에 붙는 작은 체크박스. 단계의 하위 옵션을 표시할 때 쓴다."""
+
+    def __init__(self, parent, variable: tk.BooleanVar, bg, text="수정"):
+        self._text = text
+        self._enabled = True
+        w = 16 + 4 + 10 * len(text) + 6
+        super().__init__(parent, width=w, height=26, bg=bg,
+                         highlightthickness=0, bd=0)
+        self.var = variable
+        self.bind("<Button-1>", self._click)
+        self.configure(cursor="hand2")
+        self.var.trace_add("write", lambda *a: self._draw())
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        on = bool(self.var.get())
+        box = ACCENT if (on and self._enabled) else (TRACK if self._enabled else BORDER)
+        round_rect(self, 3, 7, 17, 21, 4, fill=box if on else CARD, outline=box)
+        if on:
+            self.create_line(6, 14, 9, 17, 14, 11, fill="#FFFFFF", width=2)
+        self.create_text(21, 14, text=self._text, anchor="w",
+                         fill=(INK if on else MUTE) if self._enabled else BORDER,
+                         font=(FONT, 8, "bold" if on else "normal"))
+
+    def _click(self, _e):
+        if self._enabled:
+            self.var.set(not self.var.get())
+
+    def set_enabled(self, on: bool):
+        self._enabled = bool(on)
+        self.configure(cursor="hand2" if self._enabled else "arrow")
+        self._draw()
+
+
 class RButton(tk.Canvas):
     """둥근 버튼 (primary / ghost / mini) + hover."""
 
@@ -446,6 +482,10 @@ class App:
         self._stop = False
         self._phase_vars: dict[str, tk.BooleanVar] = {}
         self._phase_pills: dict[str, Pill] = {}
+        # 부속서류 '수정'(기존 제출분 삭제 후 재제출) — 되돌릴 수 없어 기본 꺼짐.
+        # 설정에 저장하지 않는다: 켠 채로 잊고 다음 날 그대로 도는 것이 가장 위험하다.
+        self.var_attach_fix = tk.BooleanVar(value=False)
+        self._attach_fix_chk = None
 
         # 검증(_missing)이 참조하므로 _build_ui 전에 설정.
         self._browsers_ready = browser_setup.browsers_ready()
@@ -632,7 +672,8 @@ class App:
         # 왼쪽: 단계 라벨(토글·배지·이름) — 가로 스크롤해도 고정.
         # ⚠ width를 반드시 지정 — pack_propagate(False)라 미지정 시 부모 폭을 다 먹어
         #   오른쪽 셀 캔버스와 겹치고 스크롤 판정이 깨진다.
-        left = tk.Frame(body, bg=CARD, width=236, height=h)   # 가장 긴 단계명(166px)+토글+여백
+        # 부속서류 행에 [수정] 체크박스(약 40px)가 더 붙으므로 그만큼 넓혔다.
+        left = tk.Frame(body, bg=CARD, width=280, height=h)   # 가장 긴 단계명(166px)+토글+여백
         left.pack(side="left", anchor="n")
         left.pack_propagate(False)
         tk.Frame(left, bg=CARD, height=self.MHEAD_H).pack(fill="x")   # 헤더 자리 맞춤
@@ -640,8 +681,6 @@ class App:
             row = tk.Frame(left, bg=CARD, height=self.MROW_H)
             row.pack(fill="x")
             row.pack_propagate(False)
-            # ⚠ 기본은 켜짐이지만, 되돌릴 수 없는 단계(부속서류 수정=기존 제출분 삭제)는
-            #   모듈이 DEFAULT_ON=False로 꺼둔다. 필요할 때만 사용자가 켠다.
             var = tk.BooleanVar(value=getattr(mod, "DEFAULT_ON", True))
             self._phase_vars[mod.KEY] = var
             var.trace_add("write", lambda *a, k=mod.KEY: self._sync_row_enabled(k))
@@ -652,6 +691,12 @@ class App:
             fg = SITE_BADGE.get(site, (None, INK))[1]
             tk.Label(row, text=f"{i}. {mod.LABEL}", bg=CARD, fg=fg,
                      font=(FONT, 9)).pack(side="left", padx=(10, 0))
+            # 부속서류 '수정' — 별도 단계로 두면 제출과 둘 다 켜지는 걸 막아야 해서
+            # 규칙이 늘어난다. 같은 작업 앞에 삭제가 붙는 것뿐이라 하위 옵션으로 둔다.
+            # ⚠ 되돌릴 수 없다 → 기본 꺼짐. settings에 저장하지 않아 재시작하면 꺼진다.
+            if mod.KEY == "hometax_attach":
+                self._attach_fix_chk = MiniCheck(row, self.var_attach_fix, CARD, "수정")
+                self._attach_fix_chk.pack(side="left", padx=(6, 0))
 
         # 오른쪽: 신고인별 셀 — 사람이 많으면 가로 스크롤(스크롤바는 넘칠 때만)
         right = tk.Frame(body, bg=CARD)
@@ -746,6 +791,8 @@ class App:
         체크된 '대기' 상태로 되돌린다(완료 후 체크가 자동으로 풀려 있어도 재실행 가능).
         """
         on = self._phase_vars[phase_key].get()
+        if phase_key == "hometax_attach" and self._attach_fix_chk is not None:
+            self._attach_fix_chk.set_enabled(on)   # 단계를 끄면 하위 옵션도 흐리게
         for (k, i), cell in getattr(self, "_cells", {}).items():
             if k != phase_key:
                 continue
@@ -1044,12 +1091,11 @@ class App:
                 need("wetax", "위택스 변환파일")
             if "hometax_filing" in sel:
                 need("hometax", "홈택스 변환파일")
-            if sel & {"hometax_attach", "hometax_attach_fix",
-                      "hometax_docs", "hometax_napbu"}:
+            if sel & {"hometax_attach", "hometax_docs", "hometax_napbu"}:
                 digits = "".join(c for c in pv["rrn"].get() if c.isdigit())
                 if len(digits) != 13:
                     miss.append(f"{who}: 주민등록번호(13자리)")
-            if sel & {"hometax_attach", "hometax_attach_fix"}:
+            if "hometax_attach" in sel:
                 need("attach", "부속서류 폴더")
             if (sel & {"hometax_docs", "wetax_docs", "hometax_napbu", "wetax_napbu"}) \
                     and self.var_mode.get() == "pdf":
@@ -1101,6 +1147,7 @@ class App:
             hometax_convert_file=pv["hometax"].get().strip(),
             seller_rrn="".join(c for c in pv["rrn"].get() if c.isdigit()),
             attach_folder=pv["attach"].get().strip(),
+            replace_attachments=self.var_attach_fix.get(),
             output_dir=pv["outdir"].get().strip(),
             output_mode=self.var_mode.get(),
             auto_submit=True,  # 제출까지 자동(토글 제거). 검증까지만 원하면 코드/요청으로 조정.

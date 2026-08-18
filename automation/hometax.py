@@ -444,22 +444,47 @@ async def navigate_to_attach(page, log=print) -> bool:
     return False
 
 
-async def query_and_open_attach(ctx, page, rrn: str, log=print):
-    """주민번호 조회 → 조회완료 알림 닫기 → '첨부하기'(새 팝업) → 팝업 page 반환(없으면 None)."""
+async def query_attach(page, rrn: str, log=print) -> bool:
+    """주민번호 입력 → 조회 → 조회완료 알림 닫기. (첨부/제출내역 어느 쪽이든 공통)"""
     if not await _fill_rrn(page, rrn, log):
-        return None
+        return False
     await page.wait_for_timeout(400)
     try:
         await page.get_by_role("button", name="조회").first.click(timeout=5000)
     except Exception:
         try:
             await page.get_by_text("조회", exact=True).last.click(timeout=5000)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             log(f"[!] (홈택스) 조회 클릭 실패: {str(e)[:60]}")
-            return None
+            return False
     # 조회 완료 알림 — 뜰 때까지 폴링(고정 대기 대신). 모달이 남아 있으면 아래 클릭이 막힌다.
     await page.wait_for_timeout(600)
     await _click_modal_confirm(page, must_contain="완료", log=log, timeout=8.0)
+    return True
+
+
+async def attach_state(page) -> str:
+    """조회 결과의 부속서류 칸 상태 — 'submitted' | 'new' | ''(행을 못 찾음).
+
+    두 버튼은 배타적이다: 아직 안 냈으면 [첨부하기], 이미 냈으면 그 자리에 [제출내역보기].
+    행이 그려지기 전에 한 번만 보면 둘 다 없어 오판하므로 폴링한다.
+    """
+    for _ in range(20):                 # 최대 ~8초
+        try:
+            if await page.get_by_text("제출내역보기", exact=True).count() > 0:
+                return "submitted"
+            if await page.get_by_text("첨부하기", exact=True).count() > 0:
+                return "new"
+        except Exception:
+            pass
+        await page.wait_for_timeout(400)
+    return ""
+
+
+async def query_and_open_attach(ctx, page, rrn: str, log=print):
+    """주민번호 조회 → 조회완료 알림 닫기 → '첨부하기'(새 팝업) → 팝업 page 반환(없으면 None)."""
+    if not await query_attach(page, rrn, log):
+        return None
     try:
         # '첨부하기'는 조회 결과 행이 그려진 뒤에 나타난다 — locator가 자동 대기(12초)
         async with ctx.expect_page(timeout=15000) as info:
@@ -551,24 +576,11 @@ async def _click_in_list_modal(page, text: str) -> bool:
     return bool(await _list_modal_js(page, "click", text))
 
 
-async def open_submitted_list(page, rrn: str, log=print) -> bool:
-    """주민번호 조회 → [제출내역보기] → 제출목록 모달 열기.
+async def open_submitted_list(page, log=print) -> bool:
+    """[제출내역보기] → 제출목록 모달 열기. **조회는 이미 끝난 상태여야 한다**(query_attach).
 
     한 번도 제출한 적 없으면 그 자리에 [첨부하기]만 있다 → False(오류 아님, 지울 게 없음).
     """
-    if not await _fill_rrn(page, rrn, log):
-        return False
-    await page.wait_for_timeout(400)
-    try:
-        await page.get_by_role("button", name="조회").first.click(timeout=5000)
-    except Exception:
-        try:
-            await page.get_by_text("조회", exact=True).last.click(timeout=5000)
-        except Exception as e:  # noqa: BLE001
-            log(f"[!] (홈택스) 조회 클릭 실패: {str(e)[:60]}")
-            return False
-    await page.wait_for_timeout(600)
-    await _click_modal_confirm(page, must_contain="완료", log=log, timeout=8.0)
     try:
         await page.get_by_text("제출내역보기", exact=True).first.click(timeout=8000)
     except Exception:
