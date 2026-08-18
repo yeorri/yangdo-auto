@@ -640,7 +640,9 @@ class App:
             row = tk.Frame(left, bg=CARD, height=self.MROW_H)
             row.pack(fill="x")
             row.pack_propagate(False)
-            var = tk.BooleanVar(value=True)
+            # ⚠ 기본은 켜짐이지만, 되돌릴 수 없는 단계(부속서류 수정=기존 제출분 삭제)는
+            #   모듈이 DEFAULT_ON=False로 꺼둔다. 필요할 때만 사용자가 켠다.
+            var = tk.BooleanVar(value=getattr(mod, "DEFAULT_ON", True))
             self._phase_vars[mod.KEY] = var
             var.trace_add("write", lambda *a, k=mod.KEY: self._sync_row_enabled(k))
             Toggle(row, var, CARD).pack(side="left")
@@ -1042,11 +1044,12 @@ class App:
                 need("wetax", "위택스 변환파일")
             if "hometax_filing" in sel:
                 need("hometax", "홈택스 변환파일")
-            if sel & {"hometax_attach", "hometax_docs", "hometax_napbu"}:
+            if sel & {"hometax_attach", "hometax_attach_fix",
+                      "hometax_docs", "hometax_napbu"}:
                 digits = "".join(c for c in pv["rrn"].get() if c.isdigit())
                 if len(digits) != 13:
                     miss.append(f"{who}: 주민등록번호(13자리)")
-            if "hometax_attach" in sel:
+            if sel & {"hometax_attach", "hometax_attach_fix"}:
                 need("attach", "부속서류 폴더")
             if (sel & {"hometax_docs", "wetax_docs", "hometax_napbu", "wetax_napbu"}) \
                     and self.var_mode.get() == "pdf":

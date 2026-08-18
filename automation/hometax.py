@@ -479,6 +479,143 @@ async def query_and_open_attach(ctx, page, rrn: str, log=print):
         return None
 
 
+# ─────────────────── 부속서류 수정(기존 제출분 삭제) ───────────────────
+# 이미 부속서류를 제출한 신고건은 조회 결과의 [첨부하기] 자리에 **[제출내역보기]**가 뜬다.
+# 수정 절차: 제출내역보기 → 제출목록 모달에서 라디오 선택 → [선택한 부속서류 삭제]
+#            → '정상 삭제' 알림 확인 → (전부 지울 때까지 반복) → 모달 닫고 평소대로 재제출.
+SUBMITTED_LIST_TITLE = "부속서류 제출목록"
+
+
+def _list_modal(page, title: str = SUBMITTED_LIST_TITLE):
+    """제출목록 모달 locator. 바깥의 '신고 부속·증빙서류 제출' 모달과 섞이지 않게
+    제목 텍스트로 좁힌다(둘 다 .w2window라 클래스만으로는 구분 불가)."""
+    return page.locator(".w2window:visible").filter(has_text=title).last
+
+
+async def _submitted_count(page) -> int:
+    """제출목록에 남은 부속서류 건수(행마다 선택 라디오 1개). 모달이 없으면 -1."""
+    try:
+        m = _list_modal(page)
+        if await m.count() == 0:
+            return -1
+        return await m.locator("input[type=radio]").count()
+    except Exception:
+        return -1
+
+
+async def _select_first_submitted(page) -> bool:
+    """제출목록 첫 행의 선택 라디오를 켠다. 라디오 → 강제클릭 → 셀 → JS 순으로 물러난다.
+
+    ⚠ WebSquare 라디오를 JS로 먼저 만지면 화면이 다시 그려지며 참조가 틀어진 전례가
+      있다(개인정보 공개여부 회귀) → Playwright 클릭을 우선하고 JS는 최후 수단.
+    """
+    radio = _list_modal(page).locator("input[type=radio]").first
+    attempts = (
+        lambda: radio.click(timeout=3000),
+        lambda: radio.click(timeout=3000, force=True),
+        lambda: radio.locator("xpath=ancestor::td[1]").click(timeout=3000),
+    )
+    for act in attempts:
+        try:
+            await act()
+            if await radio.is_checked():
+                return True
+        except Exception:
+            continue
+    try:
+        await radio.evaluate(
+            "el => { el.click(); el.dispatchEvent(new Event('change', {bubbles:true})); }")
+        return await radio.is_checked()
+    except Exception:
+        return False
+
+
+async def _click_in_list_modal(page, text: str) -> bool:
+    """제출목록 모달 안에서 텍스트가 정확히 일치하는 버튼 클릭(input value도 시도)."""
+    m = _list_modal(page)
+    try:
+        await m.get_by_text(text, exact=True).first.click(timeout=5000)
+        return True
+    except Exception:
+        pass
+    try:
+        await m.locator(f"input[value='{text}']").first.click(timeout=3000)
+        return True
+    except Exception:
+        return False
+
+
+async def open_submitted_list(page, rrn: str, log=print) -> bool:
+    """주민번호 조회 → [제출내역보기] → 제출목록 모달 열기.
+
+    한 번도 제출한 적 없으면 그 자리에 [첨부하기]만 있다 → False(오류 아님, 지울 게 없음).
+    """
+    if not await _fill_rrn(page, rrn, log):
+        return False
+    await page.wait_for_timeout(400)
+    try:
+        await page.get_by_role("button", name="조회").first.click(timeout=5000)
+    except Exception:
+        try:
+            await page.get_by_text("조회", exact=True).last.click(timeout=5000)
+        except Exception as e:  # noqa: BLE001
+            log(f"[!] (홈택스) 조회 클릭 실패: {str(e)[:60]}")
+            return False
+    await page.wait_for_timeout(600)
+    await _click_modal_confirm(page, must_contain="완료", log=log, timeout=8.0)
+    try:
+        await page.get_by_text("제출내역보기", exact=True).first.click(timeout=8000)
+    except Exception:
+        log("[i] (홈택스) [제출내역보기] 없음 — 기존 제출분이 없는 것으로 보고 진행")
+        return False
+    for _ in range(25):                 # 모달 등장까지 최대 10초
+        await page.wait_for_timeout(400)
+        if await _submitted_count(page) >= 0:
+            log("[v] (홈택스) 부속서류 제출목록 모달 열림")
+            return True
+    log("[!] (홈택스) 부속서류 제출목록 모달이 안 뜸")
+    return False
+
+
+async def delete_submitted_attachments(page, log=print, max_rounds: int = 20) -> int:
+    """제출목록의 기존 부속서류를 전부 삭제. 반환: 삭제 건수(실패는 -1).
+
+    ⚠ 선택이 라디오(단일 선택)라 한 번에 한 건씩만 지워진다 → 목록이 빌 때까지 반복.
+      건수가 안 줄면 즉시 중단(무한 반복 방지).
+    """
+    removed = 0
+    for _ in range(max_rounds):
+        n = await _submitted_count(page)
+        if n < 0:
+            log("[!] (홈택스) 제출목록 모달을 찾을 수 없음")
+            return removed if removed else -1
+        if n == 0:
+            break
+        if not await _select_first_submitted(page):
+            log("[!] (홈택스) 제출목록 선택 라디오를 누르지 못함")
+            return removed if removed else -1
+        if not await _click_in_list_modal(page, "선택한 부속서류 삭제"):
+            log("[!] (홈택스) [선택한 부속서류 삭제] 버튼 못 찾음")
+            return removed if removed else -1
+        # 삭제 확인 모달이 뜨는 경우(있으면) → 이어서 '정상 삭제 되었습니다' 알림.
+        await _click_modal_confirm(page, must_contain="하시겠습니까", log=log, timeout=2.0)
+        await _click_modal_confirm(page, must_contain="삭제", log=log, timeout=10.0)
+        for _ in range(15):             # 목록이 줄어들 때까지 최대 6초
+            await page.wait_for_timeout(400)
+            if 0 <= await _submitted_count(page) < n:
+                break
+        else:
+            log(f"[!] (홈택스) 삭제 후에도 목록이 {n}건 그대로 — 중단")
+            return removed if removed else -1
+        removed += 1
+        log(f"[v] (홈택스) 기존 부속서류 삭제 {removed}건 (남은 {n - 1}건)")
+    if removed:
+        log(f"[v] (홈택스) 기존 부속서류 {removed}건 삭제 완료")
+    await _click_in_list_modal(page, "닫기")
+    await page.wait_for_timeout(600)
+    return removed
+
+
 async def _popup_body(popup) -> str:
     """팝업의 모든 frame 텍스트 합치기(진단/검증용)."""
     parts = []

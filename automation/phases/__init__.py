@@ -1,6 +1,7 @@
 """Phase 레지스트리 — 기본 실행 순서.
 
 순서: ①위택스 신고(가상계좌 지연 대비 먼저) ②홈택스 신고 ③홈택스 부속서류
+      (③' 부속서류 수정 — 기존 제출분 삭제 후 재제출. 평소엔 꺼두고 필요할 때만 켠다)
       ④홈택스 접수증·신고서 출력 ⑤위택스 신고서 출력
       ⑥홈택스 납부서 출력 ⑦위택스 납부서 출력(가상계좌 대기 후).
 서류 출력과 납부서 출력을 분리 — 위택스 가상계좌 생성 지연이 신고서 출력/병합을
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 from . import (
     hometax_attach,
+    hometax_attach_fix,
     hometax_docs,
     hometax_filing,
     hometax_napbu,
@@ -24,6 +26,7 @@ ALL_PHASES = [
     wetax_filing,
     hometax_filing,
     hometax_attach,
+    hometax_attach_fix,
     hometax_docs,
     wetax_docs,
     hometax_napbu,
