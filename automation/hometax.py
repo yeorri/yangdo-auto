@@ -602,6 +602,12 @@ async def delete_submitted_attachments(page, log=print, max_rounds: int = 20) ->
       건수가 안 줄면 즉시 중단(무한 반복 방지).
     """
     removed = 0
+    total = await _submitted_count(page)
+    if total > 0:
+        # 몇 건을 지우는지 먼저 밝힌다 — 라디오가 단일 선택이라 여러 건이면 삭제·알림이
+        # 그 횟수만큼 반복된다. 이걸 안 찍으면 화면만 보고 '두 번 지운 건가?' 하게 된다.
+        log(f"[i] (홈택스) 기존 제출분 {total}건 — 한 건씩 삭제합니다"
+            f"{' (건마다 알림 2개: 정상 삭제 → 조회 완료)' if total > 1 else ''}")
     for _ in range(max_rounds):
         n = await _submitted_count(page)
         if n < 0:
