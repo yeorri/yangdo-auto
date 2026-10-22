@@ -1335,42 +1335,27 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
             pass
     await page.wait_for_timeout(1000)
 
-    # 신고서 보기 뷰어 — 창이 뜰 때까지 대기
+    # 신고서 보기 뷰어 — 창이 뜰 때까지, **그리고 목록이 실제로 보일 때까지** 대기.
+    # ⚠ '신고서 목록' 문구만으로 창을 고르면 안 된다. 2026-10 홈택스가 신고내역 조회 표에
+    #   접근성 설명('제출한 신고서 목록을 조회할 수 있습니다.')을 넣어, **본 화면**이 먼저
+    #   조건에 걸렸다(창 목록 맨 앞이라 진짜 뷰어가 뜨기 전에 잡힘) → 본 화면에서 신고서를
+    #   찾으니 0건 → 접수증+지방세만 병합되는 사고(#17·#18, 덤프로 확정).
+    #   → 본 화면은 제외하고, 신고서 항목이 1건 이상 '보이는' 창만 뷰어로 인정한다.
+    #   개인정보 공개여부 창에서 겪은 '조건에 맞는 첫 창 하나' 함정(#11)과 같은 종류다.
     async def _is_viewer(p):
-        return "신고서 목록" in await p.locator("body").inner_text(timeout=2000)
+        if p is page:
+            return False
+        if "신고서 목록" not in await p.locator("body").inner_text(timeout=2000):
+            return False
+        return bool(await _report_items(p))
 
-    viewer = await wait_page(ctx, _is_viewer, timeout=15)
+    viewer = await wait_page(ctx, _is_viewer, timeout=20)
     if viewer is None:
-        log("[!] (홈택스) 신고서 보기 뷰어 없음")
+        log("[!] (홈택스) 신고서 보기 뷰어 없음(목록이 보이는 창을 20초 안에 못 찾음)")
+        result["failed"].append("[신고서 뷰어 없음]")
         return result
 
-    # 신고서 목록 수집 — 프레임당 JS 한 번(요소별 await 왕복 제거), 목록 렌더까지 폴링.
-    # ⚠ 6초 → 15초. 2026-10-22 김정환·한진경 두 건 모두 0건으로 읽혔다(같은 코드로 7월엔
-    #   3건). 느린 날 목록이 늦게 그려졌을 가능성 — 원인 미확정이라 0건이면 덤프를 남긴다.
-    items: list = []
-    for _ in range(30):   # 최대 ~15초
-        for frame in viewer.frames:
-            try:
-                found = await frame.evaluate("""() => {
-                    const vis = el => { const r = el.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0; };
-                    const out = [];
-                    for (const el of document.querySelectorAll('a, li')) {
-                        if (!vis(el)) continue;
-                        const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-                        if ((t.includes('계산서') || t.includes('명세서'))
-                                && t.length < 40 && !out.includes(t)) out.push(t);
-                    }
-                    return out;
-                }""")
-            except Exception:
-                continue
-            for t in found:
-                if t not in items:
-                    items.append(t)
-        if items:
-            break
-        await viewer.wait_for_timeout(500)
+    items = await _report_items(viewer)
     log(f"[i] (홈택스) 신고서 {len(items)}건: {items}")
     if not items:
         # ⚠ 양도세 신고서는 최소 1건(과세표준 신고 및 납부계산서)이 반드시 있다.
@@ -1396,6 +1381,35 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
         else:
             result["failed"].append(it)
     return result
+
+
+# 신고서 뷰어의 목록 항목(보이는 a/li 중 '계산서'·'명세서'가 든 짧은 텍스트). 7월 검증 그대로.
+_REPORT_LIST_JS = """() => {
+    const vis = el => { const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0; };
+    const out = [];
+    for (const el of document.querySelectorAll('a, li')) {
+        if (!vis(el)) continue;
+        const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+        if ((t.includes('계산서') || t.includes('명세서'))
+                && t.length < 40 && !out.includes(t)) out.push(t);
+    }
+    return out;
+}"""
+
+
+async def _report_items(window) -> list:
+    """창의 모든 프레임에서 신고서 목록 항목을 모은다(프레임당 JS 1회)."""
+    items: list = []
+    for frame in window.frames:
+        try:
+            found = await frame.evaluate(_REPORT_LIST_JS)
+        except Exception:
+            continue
+        for t in found:
+            if t not in items:
+                items.append(t)
+    return items
 
 
 _REPORT_DUMP_JS = """() => {

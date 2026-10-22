@@ -40,7 +40,7 @@ def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
     """접수증 → 홈택스 양도세 신고서들(저장 순서) → 지방세 신고서 순으로 병합.
 
     파일명: [접수증&신고서]{이름}.pdf (이름은 include_name일 때만).
-    개별 파일은 지우지 않는다 — 옵션이 켜져 있으면 '병합전파일' 하위 폴더로 옮긴다.
+    개별 파일은 지우지 않는다 — 병합에 성공하면 '병합전파일' 하위 폴더로 옮긴다.
     """
     def outputs_of(key: str) -> list[str]:
         for r in results:
@@ -84,12 +84,13 @@ def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
     log(f"[i] 병합 순서: {' + '.join(ordered)} → {out_name}")
     if not pdf_save.merge_pdfs(src, out_dir / out_name, log):
         return
-    # 병합에 성공했을 때만 개별 파일을 하위 폴더로 옮긴다(옵션). 납부서는 병합에 안 들어가 대상 아님.
-    # ⚠ 예전엔 지웠다. 병합이 맞게 됐다는 전제 위의 삭제라, 그 전제가 틀리면(2026-10-22 신고서
-    #   0건 사고) 되돌릴 방법이 없었다. 옮겨두면 본 폴더는 깔끔하고, 병합본이 이상할 때 바로
-    #   대조할 수 있고, 잃는 것이 없다.
-    if inp.archive_merged_sources:
-        _archive_sources(src, out_dir, log)
+    # 병합에 성공하면 개별 파일은 항상 하위 폴더로 옮긴다(별도 옵션 없음 — 병합을 켰다는 건
+    # 본 폴더엔 병합본을 보겠다는 뜻이고, 개별 파일은 대조용으로 곁에 있으면 된다).
+    # 납부서는 병합에 안 들어가 대상 아님.
+    # ⚠ 예전엔 지웠다(옵션). 병합이 맞게 됐다는 전제 위의 삭제라, 그 전제가 틀리면(2026-10-22
+    #   신고서 0건 사고) 되돌릴 방법이 없었다. 옮겨두면 본 폴더는 깔끔하고, 병합본이 이상할 때
+    #   바로 대조할 수 있고, 잃는 것이 없다.
+    _archive_sources(src, out_dir, log)
 
 
 MERGED_SRC_DIR = "병합전파일"

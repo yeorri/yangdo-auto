@@ -25,10 +25,10 @@ class Inputs:
     auto_submit: bool = True            # 파일변환신고 제출까지 자동 여부
     disclose_personal_info: bool = True # 서류 출력 시 개인정보 공개 여부(디폴트 공개)
     include_name: bool = False          # 서류 파일명에 성명 포함(공동명의 등)
-    merge_docs: bool = False            # 접수증+신고서들 PDF 병합([접수증&신고서]) 여부
-    # 병합 성공 시 개별 접수증·신고서를 '병합전파일' 하위 폴더로 옮김(지우지 않음).
-    # (구 delete_merged_sources — 삭제는 병합이 틀렸을 때 되돌릴 수 없어 이동으로 바꿈)
-    archive_merged_sources: bool = False
+    # 접수증+신고서들 PDF 병합([접수증&신고서]). 병합에 성공하면 개별 파일은 자동으로
+    # '병합전파일' 하위 폴더로 옮긴다(지우지 않음) — 별도 옵션 없음. 병합을 끄면 개별 파일은
+    # 본 폴더에 그대로 남는다.
+    merge_docs: bool = False
     napbu_wait_sec: int = 60            # 위택스 납부서 출력 전 가상계좌 생성 대기(초)
     # 대기 중 사용자 개입용 콜백(GUI가 주입). 가상계좌는 PDF 문서 안 값이라 프로그램이
     # 생성 여부를 알 수 없어, 눈으로 확인한 사용자가 즉시 진행/연장을 지시한다.
