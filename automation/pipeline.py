@@ -245,8 +245,21 @@ class BrowserSession:
                 log(f"[i] 인쇄 대상: 기본 프린터 '{prn}'")
             else:
                 log("[!] 기본 프린터 조회 실패 — 이전 인쇄 대상이 그대로 사용될 수 있음")
-        self.pw = await async_playwright().start()
-        self.ctx = await B.launch(self.pw)
+        try:
+            self.pw = await async_playwright().start()
+            self.ctx = await B.launch(self.pw)
+        except FileNotFoundError as e:
+            # ⚠ 프로그램 폴더에서 브라우저 구동 부품(_internal\playwright\driver\node.exe)이
+            #   사라지면 여기서 '[WinError 2] 지정된 파일을 찾을 수 없습니다'만 뜬다(2026-10-22,
+            #   OneDrive 안에 둔 설치본에서 1,617개 중 node.exe 하나만 빠져 있었음).
+            #   원인을 알 수 없는 문구라 사용자가 손쓸 수 없다 → 할 일을 알려준다.
+            #   미리 검사하지 않고 실제로 실패했을 때만 바꾼다 — 사전 검사가 오판하면
+            #   멀쩡한 PC에서도 프로그램이 안 켜진다.
+            raise RuntimeError(
+                "브라우저 구동 부품이 프로그램 폴더에 없습니다. 받은 zip을 새 폴더에 다시 "
+                "풀어서 실행해 주세요. OneDrive·바탕화면처럼 동기화되는 폴더 밖"
+                "(예: C:\\YangdoAuto)에 두는 것을 권장합니다. "
+                f"(원래 오류: {e})") from e
         await B.setup_context(self.ctx, self.dialog_msgs)
         self.output_mode = output_mode
         log("[i] Chromium 실행됨.")
