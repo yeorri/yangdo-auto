@@ -1006,7 +1006,7 @@ class App:
         self.var_incname = tk.BooleanVar(value=True)
         self.var_disclose = tk.BooleanVar(value=True)
         self.var_merge = tk.BooleanVar(value=True)
-        self.var_del_src = tk.BooleanVar(value=True)
+        self.var_archive_src = tk.BooleanVar(value=True)
         self.var_napbu_wait = tk.StringVar(value="1")
 
         seg = tk.Frame(opt, bg=CARD)
@@ -1017,8 +1017,9 @@ class App:
         self._switch(opt, "파일명에 성명 포함", "공동명의 등 구분이 필요할 때", self.var_incname)
         self._switch(opt, "서류 개인정보 공개", "출력 서류에 주민번호 등 공개 표시", self.var_disclose)
         self._switch(opt, "접수증·신고서 병합", "접수증+양도세+지방세 신고서를 [접수증&신고서]로 (PDF 저장 시)", self.var_merge)
-        self._switch(opt, "   └ 병합 후 개별 원본 삭제", "병합 성공 시에만 삭제 — 병합본만 남김(납부서는 유지)",
-                     self.var_del_src)
+        self._switch(opt, "   └ 병합 후 개별 파일 정리",
+                     "병합 성공 시 개별 접수증·신고서를 [병합전파일] 폴더로 옮김 — 지우지 않음",
+                     self.var_archive_src)
 
         wrow = tk.Frame(opt, bg=CARD)
         wrow.pack(fill="x", pady=3)
@@ -1054,10 +1055,10 @@ class App:
 
     # ── 필수 입력 검증 ──
     def _setup_validation(self):
-        # 병합을 끄면 '개별 원본 삭제'도 같이 꺼짐(단독으로는 의미 없는 옵션)
+        # 병합을 끄면 '개별 파일 정리'도 같이 꺼짐(단독으로는 의미 없는 옵션)
         def _sync_del(*_a):
-            if not self.var_merge.get() and self.var_del_src.get():
-                self.var_del_src.set(False)
+            if not self.var_merge.get() and self.var_archive_src.get():
+                self.var_archive_src.set(False)
         self.var_merge.trace_add("write", _sync_del)
 
         # 사람별 입력값은 _new_person에서 개별로 trace를 건다(열이 동적이라).
@@ -1162,7 +1163,7 @@ class App:
             disclose_personal_info=self.var_disclose.get(),
             include_name=self.var_incname.get(),
             merge_docs=self.var_merge.get(),
-            delete_merged_sources=self.var_del_src.get(),
+            archive_merged_sources=self.var_archive_src.get(),
             napbu_wait_sec=self._napbu_wait_seconds(),
             # 대기 중 사용자 개입 — 누른 즉시 한 번만 소비되도록 아래에서 플래그를 리셋
             napbu_skip_check=self._consume_napbu_skip,

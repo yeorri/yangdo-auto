@@ -39,7 +39,8 @@ OPEN_ORDER = {"홈택스": 0, "위택스": 1}
 def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
     """접수증 → 홈택스 양도세 신고서들(저장 순서) → 지방세 신고서 순으로 병합.
 
-    파일명: [접수증&신고서]{이름}.pdf (이름은 include_name일 때만). 개별 원본은 보존.
+    파일명: [접수증&신고서]{이름}.pdf (이름은 include_name일 때만).
+    개별 파일은 지우지 않는다 — 옵션이 켜져 있으면 '병합전파일' 하위 폴더로 옮긴다.
     """
     def outputs_of(key: str) -> list[str]:
         for r in results:
@@ -56,8 +57,8 @@ def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
     if len(ordered) < 2:
         log(f"[i] 병합 대상 부족({len(ordered)}개) — 병합 생략")
         return
-    # ⚠ 일부만 성공한 상태로 병합하면 서류가 빠진 병합본이 만들어지고,
-    #   '개별 원본 삭제'까지 켜져 있으면 원본마저 사라진다 → 완전할 때만 병합.
+    # ⚠ 일부만 성공한 상태로 병합하면 서류가 빠진 병합본이 만들어진다(예전엔 개별 원본까지
+    #   지워 되돌릴 수 없었다 — 지금은 지우지 않고 옮긴다) → 완전할 때만 병합.
     #   '완전' = 접수증 + 양도세 신고서 1건 이상 + 지방세 신고서 1건 이상, **이번 실행에서** 모두.
     #   단계 성공 여부만 보면 안 된다: 2026-10-22에 신고서 0건이 '성공'으로 보고돼
     #   접수증+지방세만 병합되고 원본이 지워졌다. 파일 자체가 있는지를 직접 센다.
@@ -83,17 +84,48 @@ def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
     log(f"[i] 병합 순서: {' + '.join(ordered)} → {out_name}")
     if not pdf_save.merge_pdfs(src, out_dir / out_name, log):
         return
-    # 병합에 성공했을 때만 개별 원본 삭제(옵션). 납부서는 대상 아님 — 병합에 안 들어감.
-    if not inp.delete_merged_sources:
+    # 병합에 성공했을 때만 개별 파일을 하위 폴더로 옮긴다(옵션). 납부서는 병합에 안 들어가 대상 아님.
+    # ⚠ 예전엔 지웠다. 병합이 맞게 됐다는 전제 위의 삭제라, 그 전제가 틀리면(2026-10-22 신고서
+    #   0건 사고) 되돌릴 방법이 없었다. 옮겨두면 본 폴더는 깔끔하고, 병합본이 이상할 때 바로
+    #   대조할 수 있고, 잃는 것이 없다.
+    if inp.archive_merged_sources:
+        _archive_sources(src, out_dir, log)
+
+
+MERGED_SRC_DIR = "병합전파일"
+
+
+def _archive_sources(src: list[str], out_dir: Path, log) -> None:
+    """병합에 쓴 개별 접수증·신고서를 out_dir/병합전파일/ 로 옮긴다(삭제하지 않음).
+
+    재실행하면 같은 이름을 덮어쓴다. 이전 것을 뷰어로 열어둬 덮지 못하면 시각을 붙여 옮긴다.
+    """
+    from datetime import datetime
+    arch = out_dir / MERGED_SRC_DIR
+    try:
+        arch.mkdir(exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        log(f"[!] '{MERGED_SRC_DIR}' 폴더를 만들지 못함 — 개별 파일은 그대로 둠 ({str(e)[:40]})")
         return
-    removed = 0
-    for p in src:
+    moved = 0
+    for s in src:
+        p = Path(s)
+        dst = arch / p.name
         try:
-            Path(p).unlink()
-            removed += 1
+            p.replace(dst)
+        except PermissionError:
+            dst = arch / f"{p.stem}_{datetime.now():%H%M%S}{p.suffix}"
+            try:
+                p.replace(dst)
+                log(f"    기존 파일이 열려 있어 새 이름으로 이동: {dst.name}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[!] 이동 실패(본 폴더에 그대로 둠): {p.name} ({str(e)[:40]})")
+                continue
         except Exception as e:  # noqa: BLE001
-            log(f"[!] 원본 삭제 실패: {Path(p).name} ({str(e)[:40]})")
-    log(f"[i] 병합본만 남김 — 개별 접수증·신고서 {removed}개 삭제")
+            log(f"[!] 이동 실패(본 폴더에 그대로 둠): {p.name} ({str(e)[:40]})")
+            continue
+        moved += 1
+    log(f"[i] 병합에 쓴 개별 파일 {moved}개 → '{MERGED_SRC_DIR}' 폴더로 이동(병합본과 대조용)")
 
 
 def ordered_selected(selected_keys: list[str]):
