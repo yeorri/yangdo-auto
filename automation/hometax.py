@@ -1345,8 +1345,10 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
         return result
 
     # 신고서 목록 수집 — 프레임당 JS 한 번(요소별 await 왕복 제거), 목록 렌더까지 폴링.
+    # ⚠ 6초 → 15초. 2026-10-22 김정환·한진경 두 건 모두 0건으로 읽혔다(같은 코드로 7월엔
+    #   3건). 느린 날 목록이 늦게 그려졌을 가능성 — 원인 미확정이라 0건이면 덤프를 남긴다.
     items: list = []
-    for _ in range(12):   # 최대 ~6초
+    for _ in range(30):   # 최대 ~15초
         for frame in viewer.frames:
             try:
                 found = await frame.evaluate("""() => {
@@ -1370,6 +1372,13 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
             break
         await viewer.wait_for_timeout(500)
     log(f"[i] (홈택스) 신고서 {len(items)}건: {items}")
+    if not items:
+        # ⚠ 양도세 신고서는 최소 1건(과세표준 신고 및 납부계산서)이 반드시 있다.
+        #   0건을 그냥 넘기면 접수증만으로 '성공' 처리되고, 병합이 신고서 빠진 채 만들어진
+        #   뒤 원본까지 지워진다(2026-10-22 실제 사고). → 실패로 기록하고 원인을 남긴다.
+        log("[!] (홈택스) 신고서 목록을 읽지 못함 — 신고서 출력 실패로 처리")
+        result["failed"].append("[신고서 목록 0건]")
+        await _dump_report_viewer(viewer, pdf_dir, log)
     for it in items:
         if not await _click_text_in_frames(viewer, it):
             log(f"  [!] 목록 클릭 실패: {it}")
@@ -1387,6 +1396,51 @@ async def print_documents(ctx, page, pdf_dir, label: str, disclose: bool = True,
         else:
             result["failed"].append(it)
     return result
+
+
+_REPORT_DUMP_JS = """() => {
+    const out = [];
+    for (const el of document.querySelectorAll('*')) {
+        // 자기 자신에 직접 붙은 텍스트만 본다(부모가 자식 텍스트를 중복으로 끌어오지 않게)
+        const own = [...el.childNodes].filter(n => n.nodeType === 3)
+            .map(n => n.textContent).join(' ').replace(/\\s+/g, ' ').trim();
+        if (!own || !/(계산서|명세서|신고서)/.test(own)) continue;
+        const r = el.getBoundingClientRect();
+        out.push(`${el.tagName.toLowerCase()}#${el.id || ''}.${(el.className && el.className.baseVal === undefined ? el.className : '') || ''}`
+            + `  ${Math.round(r.width)}x${Math.round(r.height)}  "${own.slice(0, 60)}"`);
+        if (out.length >= 80) break;
+    }
+    return {url: location.href, head: ((document.body && document.body.innerText) || '').slice(0, 800),
+            hits: out};
+}"""
+
+
+async def _dump_report_viewer(viewer, pdf_dir, log=print) -> None:
+    """신고서 목록을 못 읽었을 때 뷰어 구조를 파일로 남긴다(다음 수정의 근거).
+
+    목록이 늦게 그려졌는지, 다른 태그로 바뀌었는지, 접힌 트리 안에 있는지를 이걸로 가른다.
+    """
+    import re as _re
+    from datetime import datetime
+    lines = ["# 신고서 뷰어 진단 덤프", f"viewer: {viewer.url}", ""]
+    for i, fr in enumerate(viewer.frames):
+        try:
+            d = await fr.evaluate(_REPORT_DUMP_JS)
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"## frame {i}: 평가 실패 ({str(e)[:60]})")
+            continue
+        head = _re.sub(r"\d{6}-?[1-4]\d{6}", "######-#######", d.get("head", ""))
+        lines += [f"## frame {i}: {d.get('url', '')}",
+                  f"- 계산서/명세서/신고서 문구가 직접 붙은 요소 {len(d.get('hits', []))}개 "
+                  f"(태그#id.class  폭x높이  \"텍스트\" — 폭·높이 0이면 숨김):",
+                  *[f"    {h}" for h in d.get("hits", [])],
+                  "- 본문 앞부분:", "    " + head.replace("\n", " / ")[:800], ""]
+    try:
+        out = Path(pdf_dir) / f"report_dump_{datetime.now():%Y%m%d_%H%M%S}.txt"
+        out.write_text("\n".join(lines), encoding="utf-8")
+        log(f"[i] (홈택스) 신고서 뷰어 진단 덤프 저장: {out.name}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[!] (홈택스) 진단 덤프 저장 실패: {str(e)[:60]}")
 
 
 async def _click_text_in_frames(window, text: str) -> bool:

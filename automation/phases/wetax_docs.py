@@ -39,8 +39,9 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         res.ok = True
         res.reason = f"{len(res.outputs)}건 {verb} 완료"
     elif res.outputs:
-        res.ok = True
-        res.reason = f"{len(res.outputs)}건 {verb}, {len(failed)}건 실패: {failed}"
+        # 일부만 저장돼도 실패 — ok=True면 병합이 서류 빠진 채 진행된다(hometax_docs와 동일).
+        res.reason = f"일부 실패 — {len(res.outputs)}건 {verb}, {len(failed)}건 실패: {failed}"
+        log(f"[!] (위택스) {res.reason}")
     else:
         res.reason = f"위택스 신고서 {verb} 실패: {failed}"
     return res

@@ -58,9 +58,17 @@ def _merge_documents(results: list[PhaseResult], inp: Inputs, log) -> None:
         return
     # ⚠ 일부만 성공한 상태로 병합하면 서류가 빠진 병합본이 만들어지고,
     #   '개별 원본 삭제'까지 켜져 있으면 원본마저 사라진다 → 완전할 때만 병합.
+    #   '완전' = 접수증 + 양도세 신고서 1건 이상 + 지방세 신고서 1건 이상, **이번 실행에서** 모두.
+    #   단계 성공 여부만 보면 안 된다: 2026-10-22에 신고서 0건이 '성공'으로 보고돼
+    #   접수증+지방세만 병합되고 원본이 지워졌다. 파일 자체가 있는지를 직접 센다.
+    #   (④만 다시 돌리는 경우도 지방세가 없어 병합하지 않는다 — 기존 병합본을 덮지 않게.)
     missing = []
     if not receipt:
         missing.append("접수증")
+    if not ht_reports:
+        missing.append("양도세 신고서")
+    if not wt_reports:
+        missing.append("지방세 신고서")
     for key, label in (("hometax_docs", "홈택스 접수증·신고서"), ("wetax_docs", "위택스 신고서")):
         res = next((r for r in results if r.key == key), None)
         if res is not None and not res.ok:

@@ -49,12 +49,16 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     res.outputs = summary.get("saved", [])
     failed = summary.get("failed", [])
     verb = "저장" if inp.output_mode == "pdf" else "출력"
+    # ⚠ 하나라도 실패하면 단계 실패다. 예전엔 일부만 저장돼도 ok=True였는데,
+    #   그러면 병합 안전장치가 통과돼 서류가 빠진 병합본이 만들어지고 원본까지 지워진다
+    #   (2026-10-22: 신고서 0건인데 '성공 / 1건 저장' → 접수증+지방세만 병합 → 원본 삭제).
+    #   저장된 파일은 outputs에 그대로 남는다 — 실패 표시는 '다시 돌려라'는 신호일 뿐.
     if res.outputs and not failed:
         res.ok = True
         res.reason = f"{len(res.outputs)}건 {verb} 완료"
     elif res.outputs:
-        res.ok = True
-        res.reason = f"{len(res.outputs)}건 {verb}, {len(failed)}건 실패: {failed}"
+        res.reason = f"일부 실패 — {len(res.outputs)}건 {verb}, {len(failed)}건 실패: {failed}"
+        log(f"[!] (홈택스) {res.reason}")
     else:
         res.reason = f"서류 {verb} 실패: {failed}"
     return res
