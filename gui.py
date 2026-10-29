@@ -1262,7 +1262,11 @@ class App:
                 elif kind == "done":
                     self._busy = False
                     self._finish_elapsed()
-                    self.status_var.set("완료 — 다음 건 입력 후 바로 시작 가능 (브라우저 유지)")
+                    if evt.get("stopped") == "filing":
+                        # 신고 실패로 멈춘 경우 '완료'로 덮으면 안 된다 — 멈춘 줄 모르고 넘어간다.
+                        self.status_var.set("신고 오류로 중단 — 로그 확인 후 고쳐서 다시 시작")
+                    else:
+                        self.status_var.set("완료 — 다음 건 입력 후 바로 시작 가능 (브라우저 유지)")
         except queue.Empty:
             pass
         self._tick_elapsed()

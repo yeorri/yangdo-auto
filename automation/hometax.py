@@ -212,6 +212,26 @@ async def verify_and_wait(page, log=print, timeout: int = 150) -> str:
     return "시간초과"
 
 
+async def content_check_error(page) -> bool:
+    """검증 결과가 '내용검증 오류'(전자제출 불가)인가. verify_and_wait가 '완료'를 돌려준 직후 호출.
+
+    ⚠ verify_and_wait의 '완료'는 '검증이 끝났다'일 뿐 '통과했다'가 아니다. 오류가 나도
+      '[내용검증하기]가 완료 되었습니다'가 뜬다. 이 판정을 빼먹어 오류 건도 제출 단계로
+      넘어가 헤매다 '제출 실패'로 끝났고, 그 사이 뒷 단계가 계속 돌았다(2026-10-28).
+    오류 화면에만 나오는 문구로 판정한다: '전자제출이 가능한 자료가 존재하지 않습니다',
+    '오류내용 확인 후 다시 변환하세요'.
+    ⚠ 단계 표시 '② 내용검증오류'는 쓰면 안 된다 — 공백을 지우고 비교하면 **정상 화면**의
+      결과표('내용검증' 제목 + '오류납세자수(확인납세자수)' 행)가 '내용검증오류납세자수…'로
+      붙어 걸린다. 그러면 모든 신고가 오류로 판정돼 매번 멈춘다(단위 테스트에서 잡음).
+    (경고 0(1)은 오류가 아니다 — check_and_save_warnings가 처리하고 제출은 진행된다.)
+    """
+    try:
+        body = "".join((await page.locator("body").inner_text(timeout=3000)).split())
+    except Exception:
+        return False
+    return "전자제출이가능한자료가존재하지않습니다" in body or "오류내용확인후다시변환" in body
+
+
 async def _click_modal_confirm(page, must_contain: str, log=print,
                                timeout: float = 4.0) -> bool:
     """텍스트에 must_contain이 든 보이는 WebSquare 모달의 '확인'을 클릭.

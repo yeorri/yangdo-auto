@@ -2,7 +2,8 @@
 
 브라우저는 BrowserSession으로 GUI 수명 동안 유지된다: 첫 실행에서 launch+로그인하고,
 실행이 끝나도 닫지 않아 다음 건을 재로그인 없이 이어서 처리할 수 있다.
-phase는 서로 독립이라 한쪽 실패가 다음 phase를 자동으로 막지는 않는다(계속 진행, 결과만 기록).
+출력·부속서류 단계는 실패해도 다음 단계로 계속 간다(결과만 기록, 나중에 그 단계만 재실행).
+단 **신고 단계(①위택스·②홈택스)가 실패하면 그 즉시 전체를 멈춘다**(FILING_KEYS).
 (ingunbi_auto에서 검증된 세션 패턴)
 """
 from __future__ import annotations
@@ -22,16 +23,13 @@ Emit = Callable[..., None]
 
 SITE_SUB = {"홈택스": "hometax.go.kr", "위택스": "wetax.go.kr"}
 
-# 앞 단계가 실패하면 의미가 없는(신고건 자체가 없는) 후속 단계 — 같은 실행에서
-# 그 신고 단계를 켰다가 실패한 경우에만 건너뛴다. 신고를 아예 안 켰으면(이미 신고됨)
-# 출력만 돌리는 정상 사용이므로 건너뛰지 않는다.
-DEPENDS_ON = {
-    "hometax_attach": "hometax_filing",
-    "hometax_docs": "hometax_filing",
-    "hometax_napbu": "hometax_filing",
-    "wetax_docs": "wetax_filing",
-    "wetax_napbu": "wetax_filing",
-}
+# 신고 단계 — 하나라도 실패하면 그 자리에서 전체 실행을 멈춘다(남은 단계·다음 신고인·
+# 위택스 납부서 몰아치기 모두). 예전엔 실패한 신고에 딸린 단계만 건너뛰었는데(DEPENDS_ON),
+# 그러면 ②홈택스가 내용검증 오류로 실패해도 ①위택스가 성공했다면 ⑤⑦ 위택스 출력과 다음
+# 신고인이 계속 돌았다(2026-10-28 실사용). 신고가 반쪽인 채로 출력물이 쌓이는 것보다, 멈추고
+# 고친 뒤 이어서 돌리는 게 맞다 — 남은 칸은 체크된 채로 남아 [시작]을 다시 누르면 이어진다.
+# 신고 단계를 아예 안 켠 실행(이미 신고됨, 출력만)은 해당 없음.
+FILING_KEYS = ("wetax_filing", "hometax_filing")
 # 여는 순서: 홈택스 먼저 → 위택스 나중(새 탭이 맨 앞 = 위택스부터 로그인 유도)
 OPEN_ORDER = {"홈택스": 0, "위택스": 1}
 
@@ -315,19 +313,10 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
     merged = False
 
     ctx = session.ctx
-    failed_keys: set = set()
     for mod in phases:
         if stop_check and stop_check():
             log("[i] 중단됨.")
             break
-        # 선행 신고 단계가 이번 실행에서 실패했으면 후속 단계는 헛돌 뿐이라 건너뛴다
-        dep = DEPENDS_ON.get(mod.KEY)
-        if dep and dep in failed_keys:
-            log(f"[i] {mod.LABEL}: 건너뜀 — 선행 단계 실패(신고건 없음)")
-            res = PhaseResult(mod.KEY, mod.LABEL, ok=False, reason="선행 단계 실패로 건너뜀")
-            results.append(res)
-            emit("phase", key=mod.KEY, status="fail")
-            continue
         emit("phase", key=mod.KEY, status="run")
         log(f"[i] ===== {mod.LABEL} 시작 =====")
         try:
@@ -338,12 +327,16 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
             res = PhaseResult(mod.KEY, mod.LABEL, ok=False, reason=f"예외: {e}")
             log(f"[!] {mod.LABEL} 예외: {e}")
         results.append(res)
-        if not res.ok:
-            failed_keys.add(mod.KEY)
         emit("phase", key=mod.KEY, status="ok" if res.ok else "fail")
         tail = (f" / 접수 {res.receipt_no}" if res.receipt_no else "") + \
                (f" / {res.reason}" if res.reason else "")
-        log(f"[v] {mod.LABEL}: {'성공' if res.ok else '실패'}{tail}")
+        # ⚠ 실패도 예전엔 '[v]'로 찍혀 로그창에서 초록색으로 보였다 — 실패는 '[!]'(빨강).
+        log(f"{'[v]' if res.ok else '[!]'} {mod.LABEL}: {'성공' if res.ok else '실패'}{tail}")
+
+        if not res.ok and mod.KEY in FILING_KEYS:
+            _log_filing_stop(results, res, phases, log)
+            emit("status", text="신고 오류로 중단 — 로그를 확인하세요")
+            break
 
         # 마지막 신고서류 phase 직후 병합(납부서 phase 전에). 순서: 접수증→홈택스 신고서들→지방세 신고서.
         if not merged and mod.KEY == last_docs_key and inp.merge_docs \
@@ -351,9 +344,31 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
             _merge_documents(results, inp, log)
             merged = True
 
-    log("[i] 전체 단계 종료 — 브라우저는 유지됩니다. 다음 건을 입력하고 다시 시작하세요.")
+    if not filing_failed(results):
+        log("[i] 전체 단계 종료 — 브라우저는 유지됩니다. 다음 건을 입력하고 다시 시작하세요.")
     emit("done", results=results)
     return results
+
+
+def filing_failed(results: list[PhaseResult]) -> bool:
+    """이번 실행에서 신고 단계(①②)가 실패했는가 — 그러면 전체를 멈춘다."""
+    return any(r.key in FILING_KEYS and not r.ok for r in results)
+
+
+def _log_filing_stop(results: list[PhaseResult], failed: PhaseResult, phases, log) -> None:
+    """신고 실패로 멈출 때 — 무엇이 실패했고, 무엇이 이미 제출됐고, 무엇을 하면 되는지."""
+    log("[!] ■■■ 신고 단계 실패 — 여기서 전체 실행을 멈춥니다 ■■■")
+    log(f"[!] 실패: {failed.label} — {failed.reason or '사유 미상'}")
+    done = [r.label for r in results if r.key in FILING_KEYS and r.ok]
+    if done:
+        # ①위택스가 먼저 돌기 때문에 ②홈택스가 실패하면 지방세만 접수된 반쪽 상태가 된다.
+        log(f"[!] ⚠ {', '.join(done)}은(는) 이미 제출됐습니다. 오류를 고쳐 금액이 바뀌면 "
+            f"그쪽도 다시 신고해야 합니다(완료된 칸은 체크가 풀려 있으니 직접 켜야 함).")
+    keys = [m.KEY for m in phases]
+    rest = [m.LABEL for m in phases[keys.index(failed.key) + 1:]]
+    if rest:
+        log(f"[i] 진행하지 않은 단계: {', '.join(rest)}")
+    log("[i] 오류를 고쳐 변환파일을 다시 만든 뒤 [시작]을 누르면, 체크가 남아 있는 칸부터 이어서 진행합니다.")
 
 
 def _person_emit(emit: Emit, idx: int) -> Emit:
@@ -368,12 +383,15 @@ def _person_emit(emit: Emit, idx: int) -> Emit:
 
 async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
                     stop_check: Callable[[], bool] | None = None) -> list:
-    """여러 신고인을 순차 실행. 한 명이 실패해도 다음 사람은 계속 진행.
+    """여러 신고인을 순차 실행. 출력·부속서류 실패는 다음 사람으로 계속 진행.
 
     jobs: [(Inputs, [phase_key, ...]), ...] — 신고인마다 실행할 단계가 다를 수 있다
           (완료된 단계는 GUI가 빼고 넘겨 실패분만 재시도되게 함).
     ⑦ 위택스 납부서(가상계좌 대기)는 **전원 나머지 단계를 끝낸 뒤 마지막에 몰아서** 한다.
     앞사람 가상계좌가 뒷사람 처리 중에 이미 생성돼 대기 시간이 거의 사라진다.
+    ⚠ 누구든 **신고 단계(①②)가 실패하면 다음 신고인도, 몰아둔 ⑦도 진행하지 않는다.**
+      공동명의는 같은 자료로 만든 변환파일이라 같은 오류가 날 가능성이 크고, 고친 뒤
+      [시작]을 다시 누르면 남은 칸부터 이어진다.
     """
     def log(m: str):
         emit("log", text=m)
@@ -387,6 +405,7 @@ async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
     defer_napbu = len(jobs) > 1 and any(last_key in keys for _inp, keys in jobs)
 
     out: list = [[] for _ in jobs]
+    stopped = False          # 신고 실패로 전체 중단했는가
     for idx, (inp, keys) in enumerate(jobs):
         if stop_check and stop_check():
             log("[i] 중단됨.")
@@ -407,9 +426,16 @@ async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
         out[idx] = res
         ok = bool(res) and all(r.ok for r in res)
         emit("person", index=idx, status="ok" if ok else "fail")
+        if filing_failed(res):
+            stopped = True
+            later = [j[0].name_label or f"{i + 1}번" for i, j in enumerate(jobs) if i > idx]
+            if later or defer_napbu:
+                log(f"[i] 진행하지 않은 신고인·단계: "
+                    f"{', '.join(later + (['위택스 납부서(전원)'] if defer_napbu else []))}")
+            break
 
     # 미뤄둔 위택스 납부서 — 전원 몰아서
-    if defer_napbu and not (stop_check and stop_check()):
+    if defer_napbu and not stopped and not (stop_check and stop_check()):
         log("[i] ########## 위택스 납부서 (전원) ##########")
         for idx, (inp, keys) in enumerate(jobs):
             if stop_check and stop_check():
@@ -428,8 +454,11 @@ async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
                 res = []
             out[idx].extend(res)
 
-    log("[i] 전체 신고인 종료 — 브라우저는 유지됩니다.")
-    emit("done", results=out)
+    if stopped:
+        log("[!] 신고 오류로 중단 — 브라우저는 유지됩니다. 오류를 고친 뒤 [시작]을 다시 누르세요.")
+    else:
+        log("[i] 전체 신고인 종료 — 브라우저는 유지됩니다.")
+    emit("done", results=out, stopped="filing" if stopped else "")
     return out
 
 

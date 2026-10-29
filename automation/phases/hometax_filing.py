@@ -51,6 +51,14 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         res.reason = f"검증 미완료({status})"
         return res
 
+    # 3-0) 내용검증 '오류'면 여기서 끝 — 제출 단계로 넘어가지 않는다.
+    #      ('완료'는 검증이 끝났다는 뜻일 뿐, 오류여도 완료 문구가 뜬다.)
+    if await H.content_check_error(page):
+        res.reason = ("내용검증 오류 — 전자제출 불가. 홈택스 화면의 [오류자료]로 내용을 확인하고 "
+                      "양도박사에서 고쳐 변환파일을 다시 만드세요")
+        log(f"[!] (홈택스) {res.reason}")
+        return res
+
     # 3-1) 내용검증 경고(오류 아님) 확인 — 있으면 경고내역을 엑셀로 받아 두고 모달을 닫는다.
     #      (제출은 막히지 않지만 나중에 무슨 경고였는지 알아야 하므로 기록으로 남김)
     try:
