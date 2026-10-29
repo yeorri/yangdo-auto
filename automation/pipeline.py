@@ -3,7 +3,7 @@
 브라우저는 BrowserSession으로 GUI 수명 동안 유지된다: 첫 실행에서 launch+로그인하고,
 실행이 끝나도 닫지 않아 다음 건을 재로그인 없이 이어서 처리할 수 있다.
 출력·부속서류 단계는 실패해도 다음 단계로 계속 간다(결과만 기록, 나중에 그 단계만 재실행).
-단 **신고 단계(①위택스·②홈택스)가 실패하면 그 즉시 전체를 멈춘다**(FILING_KEYS).
+단 **신고 단계(①홈택스·②위택스)가 실패하면 그 즉시 전체를 멈춘다**(FILING_KEYS).
 (ingunbi_auto에서 검증된 세션 패턴)
 """
 from __future__ import annotations
@@ -25,11 +25,11 @@ SITE_SUB = {"홈택스": "hometax.go.kr", "위택스": "wetax.go.kr"}
 
 # 신고 단계 — 하나라도 실패하면 그 자리에서 전체 실행을 멈춘다(남은 단계·다음 신고인·
 # 위택스 납부서 몰아치기 모두). 예전엔 실패한 신고에 딸린 단계만 건너뛰었는데(DEPENDS_ON),
-# 그러면 ②홈택스가 내용검증 오류로 실패해도 ①위택스가 성공했다면 ⑤⑦ 위택스 출력과 다음
+# 그러면 홈택스가 내용검증 오류로 실패해도 위택스가 성공했다면 ⑤⑦ 위택스 출력과 다음
 # 신고인이 계속 돌았다(2026-10-28 실사용). 신고가 반쪽인 채로 출력물이 쌓이는 것보다, 멈추고
 # 고친 뒤 이어서 돌리는 게 맞다 — 남은 칸은 체크된 채로 남아 [시작]을 다시 누르면 이어진다.
 # 신고 단계를 아예 안 켠 실행(이미 신고됨, 출력만)은 해당 없음.
-FILING_KEYS = ("wetax_filing", "hometax_filing")
+FILING_KEYS = ("hometax_filing", "wetax_filing")   # 실행 순서와 같게(멤버십만 씀)
 # 여는 순서: 홈택스 먼저 → 위택스 나중(새 탭이 맨 앞 = 위택스부터 로그인 유도)
 OPEN_ORDER = {"홈택스": 0, "위택스": 1}
 
@@ -361,7 +361,8 @@ def _log_filing_stop(results: list[PhaseResult], failed: PhaseResult, phases, lo
     log(f"[!] 실패: {failed.label} — {failed.reason or '사유 미상'}")
     done = [r.label for r in results if r.key in FILING_KEYS and r.ok]
     if done:
-        # ①위택스가 먼저 돌기 때문에 ②홈택스가 실패하면 지방세만 접수된 반쪽 상태가 된다.
+        # 홈택스를 먼저 하므로 흔한 경우(양도세 오류)엔 여기 올 일이 없다. ②위택스가 실패하면
+        # 양도세만 접수된 반쪽 상태라 알려준다.
         log(f"[!] ⚠ {', '.join(done)}은(는) 이미 제출됐습니다. 오류를 고쳐 금액이 바뀌면 "
             f"그쪽도 다시 신고해야 합니다(완료된 칸은 체크가 풀려 있으니 직접 켜야 함).")
     keys = [m.KEY for m in phases]
