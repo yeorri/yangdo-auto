@@ -969,7 +969,8 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
             await asyncio.sleep(1)
         total += 1
         dialog_blob = " ".join(dmsgs)
-        # 실패: '첨부파일이 없습니다' 등은 dialog로만 판단(본문의 무관한 '없음' 오탐 방지).
+        # 실패(제출 거부): '첨부파일이 없습니다', '파일명에 특수문자는 들어갈 수 없습니다' 등.
+        # dialog로만 판단(본문의 무관한 '없음' 오탐 방지). 사유는 아래에서 알림 원문으로 보여준다.
         if any(k in dialog_blob for k in ("없습니다", "선택된 파일", "첨부파일이")):
             empty = True
             break
@@ -1018,7 +1019,10 @@ async def attach_files_and_submit(popup, files: list, log=print, auto_submit: bo
     if dmsgs:
         log(f"[i] (홈택스) 제출 응답: {' / '.join(m[:50] for m in dmsgs[-3:])}")
     if empty:
-        log("[!] (홈택스) 첨부파일 없음 경고 — 실제 제출 안 됨")
+        # ⚠ 예전엔 무조건 '첨부파일 없음'이라고 찍었다 — 실제 사유가 '파일명 특수문자'였던
+        #   임혜성 건에서 엉뚱한 원인을 보여줬다. 홈택스 알림 원문을 그대로 사유로 쓴다.
+        why = " ".join(dmsgs[-1].split())[:120] if dmsgs else "사유 미상"
+        log(f"[!] (홈택스) 홈택스가 제출을 거부함 — 실제 제출 안 됨: {why}")
         return False
     if success:
         log("[v] (홈택스) 부속서류 제출 완료 (확인됨)")

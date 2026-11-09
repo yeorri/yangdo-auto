@@ -20,6 +20,30 @@ KEY = "hometax_attach"
 LABEL = "홈택스 부속서류 제출"
 SITE = "홈택스"
 
+# 홈택스가 부속서류 파일명에 허용하지 않는 문자 — 제출 시 알림 원문 그대로:
+#   '파일명에 특수문자는 들어갈 수 없습니다. [ !*!=?/|:;@#$%^& ]'
+# 하나라도 걸리면 **제출 전체가 거부**된다(그 파일만 빠지는 게 아님, 2026-11 임혜성 건 '&').
+# 공백·괄호·쉼표·하이픈·밑줄은 과거 제출 성공 이력이 있어 허용으로 본다.
+FORBIDDEN_CHARS = "!*=?/|:;@#$%^&"
+
+
+def bad_attach_names(folder) -> list[tuple[str, str]]:
+    """폴더에서 홈택스가 거부할 파일명 목록 [(파일명, 걸린 문자들)]. 문제 없으면 [].
+
+    GUI가 폴더를 고르는 즉시 이걸로 검사해 [시작]을 막고, 실행 시에도 다시 확인한다
+    (같은 기준을 두 곳에서 쓰도록 여기 한 곳에 둔다).
+    """
+    try:
+        names = [p.name for p in Path(folder).iterdir() if p.is_file()]
+    except Exception:
+        return []
+    out = []
+    for n in names:
+        hit = "".join(c for c in FORBIDDEN_CHARS if c in n)
+        if hit:
+            out.append((n, hit))
+    return out
+
 
 async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     log = lambda m: emit("log", text=m)
@@ -43,6 +67,17 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     if not files:
         res.reason = "폴더에 첨부할 파일 없음"
         log(f"[!] {res.reason}")
+        return res
+
+    # 파일명 금지문자 — 홈택스에 들어가기 전에 거른다(GUI가 먼저 막지만, 시작 후 폴더가 바뀐
+    # 경우를 위해 실행 시에도 확인). 걸리면 제출 전체가 거부되므로 첨부를 시도하지 않는다.
+    named = bad_attach_names(folder)
+    if named:
+        res.reason = ("파일명에 홈택스 금지문자 — "
+                      + ", ".join(f"{n}({c})" for n, c in named[:3])
+                      + (f" 외 {len(named) - 3}개" if len(named) > 3 else ""))
+        log(f"[!] (홈택스) {res.reason}")
+        log(f"[i] (홈택스) 사용할 수 없는 문자: {' '.join(FORBIDDEN_CHARS)} — 이름을 고친 뒤 다시 실행하세요.")
         return res
 
     # ⚠ OneDrive '파일 온디맨드'는 목록엔 보여도 로컬에 실체가 없어 열 때 WinError 2가 난다.

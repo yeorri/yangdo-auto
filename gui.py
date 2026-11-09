@@ -42,6 +42,7 @@ import browser_setup
 import updater
 from automation import ALL_PHASES, BrowserSession, Inputs, run_batch
 from automation import ersfile
+from automation.phases.hometax_attach import bad_attach_names
 from automation.browser import app_data_dir
 
 # 사용자 설정(변환파일 폴더 등) — 개발: 프로젝트 폴더 / 배포: %LOCALAPPDATA%\YangdoAuto
@@ -488,6 +489,10 @@ class App:
         self.var_attach_fix = tk.BooleanVar(value=False)
         self._attach_fix_chk = None
         self._run_started: float | None = None   # 시작 누른 시각(monotonic)
+        # 부속서류 폴더 파일명 검사 캐시 {폴더: (폴더 mtime, 결과)} + 마지막 재검사 기준
+        self._attach_scan: dict = {}
+        self._attach_sig: tuple = ()
+        self._poll_n = 0
         self._elapsed_txt = ""                   # 마지막으로 표시한 경과 문자열
 
         # 검증(_missing)이 참조하므로 _build_ui 전에 설정.
@@ -1099,6 +1104,13 @@ class App:
                     miss.append(f"{who}: 주민등록번호(13자리)")
             if "hometax_attach" in sel:
                 need("attach", "부속서류 폴더")
+                # 파일명에 홈택스 금지문자가 있으면 제출 전체가 거부된다(2026-11 임혜성 건 '&')
+                # → 폴더를 고르는 즉시 알려주고 고칠 때까지 [시작]을 막는다.
+                bad = self._bad_attach_cached(pv["attach"].get().strip())
+                if bad:
+                    names = ", ".join(f"{n} ({c})" for n, c in bad[:2])
+                    more = f" 외 {len(bad) - 2}개" if len(bad) > 2 else ""
+                    miss.append(f"{who}: 부속서류 파일명에서 특수문자 빼기 — {names}{more}")
             if (sel & {"hometax_docs", "wetax_docs", "hometax_napbu", "wetax_napbu"}) \
                     and self.var_mode.get() == "pdf":
                 need("outdir", "PDF 저장 폴더")
@@ -1114,6 +1126,38 @@ class App:
         miss = self._missing()
         self.start_btn.set_enabled(not miss)
         self.hint_var.set(("필요: " + ", ".join(miss)) if miss else "")
+
+    def _bad_attach_cached(self, folder: str) -> list:
+        """부속서류 폴더의 금지문자 파일명. 폴더 mtime이 같으면 다시 읽지 않는다
+        (_missing은 입력 한 글자마다 불리므로)."""
+        if not folder:
+            return []
+        try:
+            mt = os.stat(folder).st_mtime
+        except OSError:
+            return []
+        hit = self._attach_scan.get(folder)
+        if hit and hit[0] == mt:
+            return hit[1]
+        bad = bad_attach_names(folder)
+        self._attach_scan[folder] = (mt, bad)
+        return bad
+
+    def _recheck_attach_folders(self):
+        """폴더를 고른 뒤 탐색기에서 파일 이름을 고치면 입력값은 그대로라 검증이 다시 안 돈다
+        → 경고가 남아 [시작]이 계속 꺼진다. 폴더 내용(mtime)이 바뀌었으면 다시 검증한다."""
+        sig = []
+        for pv in self.people:
+            f = pv["attach"].get().strip()
+            if f:
+                try:
+                    sig.append((f, os.stat(f).st_mtime))
+                except OSError:
+                    sig.append((f, None))
+        sig = tuple(sig)
+        if sig != self._attach_sig:
+            self._attach_sig = sig
+            self._refresh_validation()
 
     # ── 파일 선택 ──
     def _pick_file(self, var):
@@ -1270,6 +1314,9 @@ class App:
         except queue.Empty:
             pass
         self._tick_elapsed()
+        self._poll_n += 1
+        if self._poll_n % 20 == 0 and not self._busy:   # 2초마다
+            self._recheck_attach_folders()
         self.root.after(100, self._poll)
 
     # ── 경과 시간 ──
