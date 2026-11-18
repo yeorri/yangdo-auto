@@ -42,6 +42,7 @@ import browser_setup
 import updater
 from automation import ALL_PHASES, BrowserSession, Inputs, run_batch
 from automation.pipeline import FILING_KEYS
+from automation import filed
 from automation import ersfile
 from automation.phases.hometax_attach import bad_attach_names
 from automation.browser import app_data_dir
@@ -1242,14 +1243,24 @@ class App:
         # 시작 전 확인 — 신고는 되돌릴 수 없어서 두 경우만 한 번 묻는다(막지는 않는다).
         filing_names = {k: self._label_of(k) for k in FILING_KEYS}
         # ① 이미 완료된 신고 칸을 다시 켰다 → 신고가 한 번 더 접수된다.
-        again = [f"{people[i].name_label} — {filing_names[k]}"
-                 for i, (_inp, keys) in enumerate(jobs) for k in keys
-                 if k in FILING_KEYS and (k, i) in self._cells and self._cells[(k, i)].status == "ok"]
+        #    프로그램을 껐다 켜면 칸이 전부 '대기'로 돌아오므로, 칸 표시뿐 아니라 **신고 기록**
+        #    (filed.json — 그 변환파일로 신고한 일시)도 본다. 중간에 멈춘 건을 이어서 할 때
+        #    이미 끝난 신고까지 다시 넣는 실수를 여기서 잡는다.
+        again = []
+        for i, (inp, keys) in enumerate(jobs):
+            for k in keys:
+                if k not in FILING_KEYS:
+                    continue
+                conv = inp.hometax_convert_file if k == "hometax_filing" else inp.wetax_convert_file
+                at = filed.when(conv)
+                if at or ((k, i) in self._cells and self._cells[(k, i)].status == "ok"):
+                    again.append(f"{inp.name_label} — {filing_names[k]}"
+                                 + (f" ({at} 신고 기록)" if at else ""))
         if again and not messagebox.askyesno(
                 "이미 완료된 신고를 다시 실행합니다",
                 "아래 신고는 이미 완료됐습니다. 계속하면 신고가 한 번 더 접수됩니다.\n\n"
                 + "\n".join(f"· {a}" for a in again)
-                + "\n\n다시 신고할까요?\n(아니면 [아니요]를 누르고 해당 칸을 눌러 '완료'로 되돌리세요)",
+                + "\n\n다시 신고할까요?\n(아니면 [아니요]를 누르고 해당 칸을 눌러 꺼 주세요)",
                 icon="warning", default="no"):
             return
         # ② 신고가 '실패'인 채 꺼져 있는데 그 사람의 다른 단계는 켜져 있다 → 신고 없이 뒤 단계만 돈다.

@@ -387,6 +387,7 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
             filed.remember(inp.hometax_convert_file, res.receipt_no)
         elif res.ok and mod.KEY == "wetax_filing" and inp.auto_submit:
             wetax_filed.append(inp)
+            filed.remember(inp.wetax_convert_file)      # 접수번호는 없지만 '신고했다'는 기록
         emit("phase", key=mod.KEY, status="ok" if res.ok else "fail")
         tail = (f" / 접수 {res.receipt_no}" if res.receipt_no else "") + \
                (f" / {res.reason}" if res.reason else "")

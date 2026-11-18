@@ -29,17 +29,29 @@ def _load() -> dict:
         return {}
 
 
-def remember(convert_file: str, receipt_no: str) -> None:
-    """신고 직후 호출. 같은 변환파일로 다시 신고하면 새 접수번호로 덮어쓴다."""
+def remember(convert_file: str, receipt_no: str = "") -> None:
+    """신고 직후 호출. 같은 변환파일로 다시 신고하면 새 기록으로 덮어쓴다.
+
+    접수번호가 없어도(위택스, 또는 홈택스에서 못 읽은 경우) '언제 신고했다'는 사실은 남긴다 —
+    프로그램을 껐다 켜면 칸이 전부 '대기'로 돌아오는데, 그때 이미 신고한 변환파일을 또
+    신고하려 하면 GUI가 이 기록을 보고 한 번 묻는다(when).
+    """
     k = _key(convert_file)
-    if not k or not receipt_no:
+    if not k:
         return
     d = _load()
+    if not receipt_no:              # 뒤늦은 호출이 이미 적어둔 접수번호를 지우지 않게
+        receipt_no = (d.get(k) or {}).get("receipt", "")
     d[k] = {"receipt": receipt_no, "at": datetime.now().strftime("%Y-%m-%d %H:%M")}
     try:
         _PATH.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception:
         pass        # 기록 실패가 신고 흐름을 깨면 안 된다
+
+
+def when(convert_file: str) -> str:
+    """이 변환파일로 신고한 기록이 있으면 그 일시('YYYY-MM-DD HH:MM'), 없으면 ''."""
+    return (_load().get(_key(convert_file)) or {}).get("at", "")
 
 
 def recall(convert_file: str) -> str:
