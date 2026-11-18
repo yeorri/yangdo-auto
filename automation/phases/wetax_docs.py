@@ -45,4 +45,7 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         log(f"[!] (위택스) {res.reason}")
     else:
         res.reason = f"위택스 신고서 {verb} 실패: {failed}"
+    if summary.get("memo"):
+        # 진행은 했지만 사람이 확인할 것이 있다 — 결과 줄에도 남겨 로그 끝에서 다시 보이게.
+        res.reason += " / ⚠ 납부기한이 같은 신고건이 또 있음(로그 확인)"
     return res

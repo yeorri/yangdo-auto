@@ -353,6 +353,7 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
         return result
     due = pdf_save.fmt_due(row.get("due", "")) if "납부서" in kinds else ""
     tip = row.get("tip", "")
+    result["memo"] = row.get("memo", "")      # 납부기한이 같은 신고건이 또 있음 — 단계 결과에 덧붙인다
 
     specs = []
     if "신고서" in kinds:

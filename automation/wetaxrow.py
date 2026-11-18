@@ -101,6 +101,26 @@ def choose(rows: list, name: str, pick, trade_ym: str = "", today: str = ""):
     return r, f"{_desc(r)}{where}{note}"
 
 
+def same_due_memo(rows: list, name: str, row: dict) -> str:
+    """고른 줄과 **납부기한이 같은** 같은 사람 신고건이 더 있으면 알림 문구(없으면 '').
+
+    납부기한이 같다 = 같은 달 양도분이다. 같은 달 양도분이 따로따로 신고돼 있는 건 드문 일이라,
+    대개 ①앞 신고를 지워야 하는데 남아 있거나(다시 신고한 경우) ②두 건을 합쳐 다시 신고해야
+    하는 경우다. 프로그램은 신고 순서로 줄을 골라 그대로 진행하지만, 사람이 확인해야 한다.
+    """
+    if not row.get("due"):
+        return ""
+    same = [r for r in rows if r.get("exact")] or list(rows)
+    same = [r for r in same if r.get("done")] or same
+    twins = [r for r in same if r.get("due") == row["due"]]
+    if len(twins) < 2:
+        return ""
+    return (f"'{name}' 신고건 중 납부기한이 같은({row['due']}) 건이 {len(twins)}건 있습니다 — "
+            + " / ".join(_desc(r) for r in twins)
+            + ". 같은 달 양도분이 따로 신고된 상태입니다. 앞 신고를 지워야 하는지, "
+              "합산해서 다시 신고해야 하는지 확인하세요")
+
+
 async def pick_and_expand(page, name: str, pick, trade_ym: str = "", log=print):
     """신고내역에서 이 신고건의 줄을 골라 '출력물 보기'를 누른다. 반환: 고른 줄(dict) | None.
 
@@ -120,6 +140,10 @@ async def pick_and_expand(page, name: str, pick, trade_ym: str = "", log=print):
         log(f"[!] (위택스) {msg}")
         return None
     log(f"[i] (위택스) {name} 신고건 선택: {msg}")
+    memo = same_due_memo(rows, name, row)
+    if memo:
+        log(f"[!] (위택스) ⚠ 확인 필요 — {memo}")
+    row["memo"] = memo
     try:
         ok = await page.evaluate(_CLICK_JS, row["k"])
     except Exception:
