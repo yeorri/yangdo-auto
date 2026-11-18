@@ -450,19 +450,36 @@ async def navigate_to_attach(page, log=print) -> bool:
     if not await _open_and_click_submenu(page, "신고/납부", "양도소득세", log):
         log("[!] (홈택스) 양도소득세 진입 실패")
         return False
-    await page.wait_for_timeout(1500)
-    for label in ["신고 부속·증빙서류 제출", "부속·증빙서류 제출", "부속·증빙서류"]:
-        try:
-            loc = page.get_by_text(label, exact=False).first
-            if await loc.count() and await loc.is_visible():
-                await loc.click(timeout=5000)
-                await page.wait_for_timeout(2500)
-                log("[v] (홈택스) 부속·증빙서류 제출 모달 열림")
-                return True
-        except Exception:
-            continue
-    log("[!] (홈택스) 부속서류 제출 링크 못 찾음")
+    if await _click_task_link(page, ["신고 부속·증빙서류 제출", "부속·증빙서류 제출", "부속·증빙서류"]):
+        log("[v] (홈택스) 부속·증빙서류 제출 모달 열림")
+        return True
+    log("[!] (홈택스) 부속서류 제출 링크 못 찾음(20초 대기)")
     return False
+
+
+async def _click_task_link(page, labels: list, timeout: float = 20.0) -> bool:
+    """양도소득세 화면의 업무 링크(신고내역 조회·부속서류 제출 등)를 **보일 때까지 기다려** 누른다.
+
+    ⚠ 예전엔 메뉴 클릭 뒤 1.5초만 기다리고 링크를 **한 번만** 찾았다. 화면이 그보다 늦게 그려지면
+      '링크 못 찾음'으로 그 단계가 통째로 실패했다(2026-11-18: 부속서류까지 성공한 뒤 접수증·신고서
+      단계가 이걸로 실패. 같은 날 진단 실행도 부속서류 화면에 못 들어갔다). 빠른 날엔 즉시 통과한다.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    await page.wait_for_timeout(600)
+    while True:
+        for label in labels:
+            try:
+                loc = page.get_by_text(label, exact=False).first
+                if await loc.count() and await loc.is_visible():
+                    await loc.click(timeout=5000)
+                    await page.wait_for_timeout(2500)
+                    return True
+            except Exception:
+                continue
+        if loop.time() >= deadline:
+            return False
+        await page.wait_for_timeout(400)
 
 
 async def query_attach(page, rrn: str, log=print) -> bool:
@@ -1082,18 +1099,10 @@ async def navigate_to_inquiry(page, log=print) -> bool:
     if not await _open_and_click_submenu(page, "신고/납부", "양도소득세", log):
         log("[!] (홈택스) 양도소득세 진입 실패")
         return False
-    await page.wait_for_timeout(1500)
-    for label in [LINK_RECEIPT_INQUIRY, "신고내역 조회", "접수증·납부서"]:
-        try:
-            loc = page.get_by_text(label, exact=False).first
-            if await loc.count() and await loc.is_visible():
-                await loc.click(timeout=5000)
-                await page.wait_for_timeout(2500)
-                log("[v] (홈택스) 신고내역 조회 모달 열림")
-                return True
-        except Exception:
-            continue
-    log("[!] (홈택스) 신고내역 조회 링크 못 찾음")
+    if await _click_task_link(page, [LINK_RECEIPT_INQUIRY, "신고내역 조회", "접수증·납부서"]):
+        log("[v] (홈택스) 신고내역 조회 모달 열림")
+        return True
+    log("[!] (홈택스) 신고내역 조회 링크 못 찾음(20초 대기)")
     return False
 
 

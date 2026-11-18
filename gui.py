@@ -1366,6 +1366,11 @@ class App:
                 elif kind == "done":
                     self._set_busy(False)
                     self._finish_elapsed()
+                    # [중단]으로 끊기면 돌던 칸이 '진행'인 채 남는다 — 끝나지 않았으니 '대기'로 되돌린다
+                    # (체크는 그대로라 다음 [시작] 때 다시 돈다).
+                    for cell in self._cells.values():
+                        if cell.status == "run":
+                            cell.set_status("idle")
                     if evt.get("stopped") == "filing":
                         # 신고 실패로 멈춘 경우 '완료'로 덮으면 안 된다 — 멈춘 줄 모르고 넘어간다.
                         self.status_var.set("신고 오류로 중단 — 로그 확인 후 고쳐서 다시 시작")
