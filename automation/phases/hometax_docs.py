@@ -37,9 +37,13 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     if not await H.navigate_to_inquiry(page, log):
         res.reason = "신고내역 조회 화면 진입 실패"
         return res
-    if not await H.open_receipt_docs(ctx, page, inp.seller_rrn, log):
-        res.reason = "접수번호 링크 열기 실패"
+    rc = await H.open_receipt_docs(ctx, page, inp.seller_rrn, log,
+                                   receipt_no=inp.hometax_receipt_no, filed_now=inp.hometax_filed_now)
+    if not rc:
+        res.reason = "신고건을 특정하지 못했거나 접수번호 링크를 열지 못함"
         return res
+    inp.hometax_receipt_no = rc
+    res.receipt_no = rc
 
     summary = await H.print_documents(
         ctx, page, out_dir, inp.name_label,

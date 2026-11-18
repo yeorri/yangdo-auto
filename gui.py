@@ -41,6 +41,7 @@ from tkinter import filedialog, messagebox, ttk
 import browser_setup
 import updater
 from automation import ALL_PHASES, BrowserSession, Inputs, run_batch
+from automation.pipeline import FILING_KEYS
 from automation import ersfile
 from automation.phases.hometax_attach import bad_attach_names
 from automation.browser import app_data_dir
@@ -115,6 +116,8 @@ class Toggle(tk.Canvas):
         self.create_oval(x, 5, x + 16, 21, fill="#FFFFFF", outline="")
 
     def _click(self, _e):
+        if getattr(self, "locked", False):      # 실행 중 — 단계 토글은 잠근다
+            return
         self.var.set(not self.var.get())
         if self.command:
             self.command()
@@ -147,7 +150,7 @@ class MiniCheck(tk.Canvas):
                          font=(FONT, 8, "bold" if on else "normal"))
 
     def _click(self, _e):
-        if self._enabled:
+        if self._enabled and not getattr(self, "locked", False):
             self.var.set(not self.var.get())
 
     def set_enabled(self, on: bool):
@@ -242,15 +245,27 @@ class Segmented(tk.Canvas):
 
 
 class CellPill(tk.Canvas):
-    """실행 단계 × 신고인 셀 — 체크(실행 여부) + 상태(대기/진행/완료/실패)를 한 칸에.
+    """실행 단계 × 신고인 칸. 다섯 가지뿐이다.
 
-    클릭하면 실행 여부가 토글된다. 완료되면 호출부가 체크를 자동으로 풀어,
-    '시작'을 다시 누르면 실패·미완료분만 재시도된다(재제출 방지).
+        ☑ 대기   이번에 돌릴 칸            → [시작]하면 실행
+        ☐ 제외   뺀 칸(아직 한 적 없음)     → 건너뜀
+          진행   지금 실행 중
+        ☐ 완료   끝난 칸                   → 건너뜀
+        ☐ 실패   실패한 칸                 → 건너뜀
+
+    **규칙은 하나 — 체크된 칸은 언제나 '대기'이고, [시작]은 '대기'만 돌린다.**
+    끝나면(완료든 실패든) 체크가 풀린다. 풀린 칸을 누르면 다시 '대기'가 되고,
+    '대기'를 누르면 원래 모습(한 적 없으면 제외, 있으면 그 결과)으로 돌아간다.
+    실행 중에는 잠긴다 — 대상은 [시작]을 누른 순간 정해져 도중에 바꿔도 반영되지 않는다.
+
+    (예전엔 결과가 있으면 체크와 무관하게 '완료'/'실패'만 보여, 눌러도 ☑만 바뀌고 무슨 일이
+     일어날지 알 수 없었다. 단계 토글에 따른 '꺼짐' 상태도 있었는데 토글과 함께 없앴다.)
     """
 
-    STYLES = {   # status -> (라벨, 배경, 글자)
-        "idle": ("대기", "#EEF2FF", "#4F46E5"),
-        "run": ("진행", "#FEF3C7", "#B45309"),
+    WAIT = ("대기", "#EEF2FF", "#4F46E5")
+    RUN = ("진행", "#FEF3C7", "#B45309")
+    REST = {   # 체크가 풀려 있을 때: 지난 결과 -> (라벨, 배경, 글자)
+        "idle": ("제외", "#F8FAFC", "#94A3B8"),
         "ok": ("완료", "#DCFCE7", "#15803D"),
         "fail": ("실패", "#FEE2E2", "#B91C1C"),
     }
@@ -260,8 +275,8 @@ class CellPill(tk.Canvas):
                          highlightthickness=0, bd=0)
         self.var = var
         self.w, self.h = width, height
-        self.status = "idle"
-        self.enabled = True          # 행(단계) 토글이 꺼지면 False
+        self.status = "idle"         # 지난 결과: idle(없음) / run / ok / fail
+        self.locked = False          # 실행 중이면 True — 클릭 무시
         self.configure(cursor="hand2")
         self.bind("<Button-1>", self._click)
         # 위젯이 파괴돼도 var는 살아남으므로(재생성 시 재사용) trace를 반드시 떼어낸다.
@@ -276,31 +291,33 @@ class CellPill(tk.Canvas):
             pass
 
     def _click(self, _e):
-        if self.enabled:
+        if not self.locked:
             self.var.set(not self.var.get())
 
     def set_status(self, status: str):
         self.status = status
         self._draw()
 
-    def set_enabled(self, b: bool):
-        self.enabled = b
-        self.configure(cursor="hand2" if b else "arrow")
-        self._draw()
+    def set_locked(self, b: bool):
+        self.locked = b
+        self.configure(cursor="arrow" if b else "hand2")
+
+    def label(self) -> str:
+        """지금 칸에 보이는 글자."""
+        return self._look()[0]
+
+    def _look(self):
+        if self.status == "run":
+            return self.RUN
+        if self.var.get():
+            return self.WAIT
+        return self.REST.get(self.status, self.REST["idle"])
 
     def _draw(self):
         self.delete("all")
-        on = bool(self.var.get())
-        label, fill, fg = self.STYLES.get(self.status, self.STYLES["idle"])
-        if not self.enabled:                 # 단계 자체가 꺼짐
-            fill, fg, label = "#F1F5F9", "#94A3B8", "꺼짐"
-        elif self.status in ("ok", "fail", "run"):
-            pass          # 실행 결과는 체크 여부와 무관하게 그대로 보여준다
-            # (완료 후 체크가 자동으로 풀려도 '완료'가 '제외'로 바뀌면 안 됨)
-        elif not on:
-            fill, fg, label = "#F8FAFC", "#94A3B8", "제외"
+        label, fill, fg = self._look()
         round_rect(self, 1, 1, self.w - 1, self.h - 1, 8, fill=fill, outline="")
-        mark = "☑" if (on and self.enabled) else "☐"
+        mark = "" if self.status == "run" else ("☑" if self.var.get() else "☐")
         if self.w >= 56:                      # 넉넉하면 체크+글자
             self.create_text(12, self.h / 2, text=mark, fill=fg, font=(FONT, 8))
             self.create_text(self.w / 2 + 6, self.h / 2, text=label, fill=fg,
@@ -482,7 +499,6 @@ class App:
         self._napbu_skip_flag = False    # [지금 출력] 눌림
         self._napbu_extend_sec = 0       # [+1분] 누적(초)
         self._stop = False
-        self._phase_vars: dict[str, tk.BooleanVar] = {}
         self._phase_pills: dict[str, Pill] = {}
         # 부속서류 '수정'(기존 제출분 삭제 후 재제출) — 되돌릴 수 없어 기본 꺼짐.
         # 설정에 저장하지 않는다: 켠 채로 잊고 다음 날 그대로 도는 것이 가장 위험하다.
@@ -673,7 +689,7 @@ class App:
     MHEAD_H = 16     # 신고인 이름 헤더 높이
 
     def _build_phase_card(self, parent, expand=False):
-        c = self._card(parent, "실행 단계", "단계 토글 = 전원 · 칸 클릭 = 그 사람만", expand=expand)
+        c = self._card(parent, "실행 단계", "☑ 대기 = [시작] 때 실행 · 칸을 눌러 켜고 끔 · 단계 이름 = 그 줄 전체", expand=expand)
         self._cells: dict = {}          # (phase_key, person_idx) -> CellPill
         self._cell_vars: dict = {}      # (phase_key, person_idx) -> BooleanVar
         self._phase_rows: dict = {}     # phase_key -> 셀이 들어갈 프레임
@@ -682,11 +698,13 @@ class App:
         body.pack(fill="x", padx=16, pady=(0, 8))
         h = self.MHEAD_H + self.MROW_H * len(ALL_PHASES)
 
-        # 왼쪽: 단계 라벨(토글·배지·이름) — 가로 스크롤해도 고정.
+        # 왼쪽: 단계 이름 — 가로 스크롤해도 고정. 이름을 누르면 그 줄 전체가 켜지고 꺼진다.
+        # (예전엔 줄마다 토글 스위치가 있었다. 칸마다 켜고 끌 수 있는데 같은 일을 하는 스위치가
+        #  하나 더 있는 셈이었고, '토글은 켜졌는데 칸은 꺼짐' 같은 헷갈리는 조합을 만들어 없앴다.)
         # ⚠ width를 반드시 지정 — pack_propagate(False)라 미지정 시 부모 폭을 다 먹어
         #   오른쪽 셀 캔버스와 겹치고 스크롤 판정이 깨진다.
         # 부속서류 행에 [수정] 체크박스(약 40px)가 더 붙으므로 그만큼 넓혔다.
-        left = tk.Frame(body, bg=CARD, width=280, height=h)   # 가장 긴 단계명(166px)+토글+여백
+        left = tk.Frame(body, bg=CARD, width=236, height=h)   # 가장 긴 단계명(166px)+[수정]+여백
         left.pack(side="left", anchor="n")
         left.pack_propagate(False)
         tk.Frame(left, bg=CARD, height=self.MHEAD_H).pack(fill="x")   # 헤더 자리 맞춤
@@ -694,16 +712,14 @@ class App:
             row = tk.Frame(left, bg=CARD, height=self.MROW_H)
             row.pack(fill="x")
             row.pack_propagate(False)
-            var = tk.BooleanVar(value=getattr(mod, "DEFAULT_ON", True))
-            self._phase_vars[mod.KEY] = var
-            var.trace_add("write", lambda *a, k=mod.KEY: self._sync_row_enabled(k))
-            Toggle(row, var, CARD).pack(side="left")
             # 사이트 배지는 뺌 — 단계명에 이미 '위택스/홈택스'가 들어 있어 중복이고,
             # 그 자리를 단계명에 줘야 잘리지 않는다. 대신 글자색으로 사이트를 구분.
             site = getattr(mod, "SITE", "")
             fg = SITE_BADGE.get(site, (None, INK))[1]
-            tk.Label(row, text=f"{i}. {mod.LABEL}", bg=CARD, fg=fg,
-                     font=(FONT, 9)).pack(side="left", padx=(10, 0))
+            lb = tk.Label(row, text=f"{i}. {mod.LABEL}", bg=CARD, fg=fg,
+                          font=(FONT, 9), cursor="hand2")
+            lb.pack(side="left", padx=(2, 0))
+            lb.bind("<Button-1>", lambda _e, k=mod.KEY: self._toggle_row(k))
             # 부속서류 '수정' — 별도 단계로 두면 제출과 둘 다 켜지는 걸 막아야 해서
             # 규칙이 늘어난다. 같은 작업 앞에 삭제가 붙는 것뿐이라 하위 옵션으로 둔다.
             # ⚠ 되돌릴 수 없다 → 기본 꺼짐. settings에 저장하지 않아 재시작하면 꺼진다.
@@ -776,6 +792,7 @@ class App:
                      font=(FONT, 8, "bold")).pack(expand=True)
         # 셀
         old = self._cell_vars
+        old_status = {k: c.status for k, c in self._cells.items()}   # 사람을 추가해도 결과는 남긴다
         self._cells.clear()
         self._cell_vars = {}
         for mod in ALL_PHASES:
@@ -784,11 +801,16 @@ class App:
                 w.destroy()
             for i in range(n):
                 key = (mod.KEY, i)
-                v = old.get(key) or tk.BooleanVar(value=True)
+                v = old.get(key)
+                if v is None:
+                    v = tk.BooleanVar(value=getattr(mod, "DEFAULT_ON", True))
+                    v.trace_add("write", lambda *a: self._on_cells_changed())
                 self._cell_vars[key] = v
                 cell = CellPill(holder, v, CARD, width=cw)
                 cell.pack(side="left", padx=1, pady=4)
-                cell.set_enabled(self._phase_vars[mod.KEY].get())
+                cell.status = old_status.get(key, "idle")
+                cell.set_locked(self._busy)
+                cell._draw()
                 self._cells[key] = cell
         # 셀 영역 폭 갱신 — 넘치면 스크롤바가 자동으로 나타난다
         try:
@@ -797,24 +819,25 @@ class App:
         except Exception:
             pass
 
-    def _sync_row_enabled(self, phase_key: str):
-        """단계 토글 on/off를 그 행의 셀들에 반영.
+    def _row_on(self, phase_key: str) -> bool:
+        """그 단계 줄에 켜진(대기) 칸이 하나라도 있는가 — '이 단계를 이번에 쓰는가'."""
+        return any(v.get() for (k, _i), v in self._cell_vars.items() if k == phase_key)
 
-        토글을 다시 켜면 '이 단계를 다시 하겠다'는 뜻이므로, 완료/실패 표시를 지우고
-        체크된 '대기' 상태로 되돌린다(완료 후 체크가 자동으로 풀려 있어도 재실행 가능).
-        """
-        on = self._phase_vars[phase_key].get()
-        if phase_key == "hometax_attach" and self._attach_fix_chk is not None:
-            self._attach_fix_chk.set_enabled(on)   # 단계를 끄면 하위 옵션도 흐리게
-        for (k, i), cell in getattr(self, "_cells", {}).items():
-            if k != phase_key:
-                continue
-            cell.set_enabled(on)
-            if on:
-                cell.set_status("idle")
-                v = self._cell_vars.get((k, i))
-                if v is not None and not v.get():
-                    v.set(True)
+    def _toggle_row(self, phase_key: str):
+        """단계 이름 클릭 — 한 칸이라도 켜져 있으면 줄 전체를 끄고, 전부 꺼져 있으면 전부 켠다."""
+        if self._busy:
+            return
+        on = not self._row_on(phase_key)
+        for (k, _i), v in self._cell_vars.items():
+            if k == phase_key and v.get() != on:
+                v.set(on)
+
+    def _on_cells_changed(self):
+        """칸이 켜지고 꺼질 때 — [수정] 옵션 흐림 처리와 [시작] 가능 여부를 다시 본다."""
+        if self._attach_fix_chk is not None:
+            self._attach_fix_chk.set_enabled(self._row_on("hometax_attach"))
+        if hasattr(self, "start_btn"):
+            self._refresh_validation()
 
     # 입력 항목 정의 — (라벨, 키, 선택방식, 힌트). 순서 = 자동입력 4개 → 사용자 선택 2개
     PERSON_FIELDS = [
@@ -1063,15 +1086,13 @@ class App:
         watch = [self.var_mode, self.var_incname]
         for v in watch:
             v.trace_add("write", lambda *a: self._refresh_validation())
-        for v in self._phase_vars.values():
-            v.trace_add("write", lambda *a: self._refresh_validation())
         self._refresh_validation()
 
     def _missing(self) -> list[str]:
         """현재 선택/입력 기준 부족한 필수 항목 라벨 목록(없으면 빈 리스트)."""
         if not self._browsers_ready:
             return ["브라우저 구성요소 다운로드 완료 대기"]
-        sel = {k for k, v in self._phase_vars.items() if v.get()}
+        sel = {m.KEY for m in ALL_PHASES if self._row_on(m.KEY)}
         if not sel:
             return ["실행 단계 선택"]
         # 빈 칸(아무것도 입력 안 된 열)은 검증·실행에서 제외 — 기본 빈 칸이 실행을 막지 않게
@@ -1176,9 +1197,9 @@ class App:
             messagebox.showinfo("실행 중", "이미 진행 중입니다. 끝난 뒤 다시 시작하세요.")
             return
 
-        selected = [k for k, v in self._phase_vars.items() if v.get()]
+        selected = [m.KEY for m in ALL_PHASES if self._row_on(m.KEY)]
         if not selected:
-            messagebox.showwarning("단계 없음", "실행할 단계를 하나 이상 켜세요.")
+            messagebox.showwarning("단계 없음", "실행할 칸을 하나 이상 켜세요(칸을 누르면 '대기'가 됩니다).")
             return
 
         active = [pv for pv in self.people if not self._is_blank(pv)]
@@ -1218,9 +1239,36 @@ class App:
                                    "칸을 클릭해 실행할 단계를 켜세요.")
             return
 
+        # 시작 전 확인 — 신고는 되돌릴 수 없어서 두 경우만 한 번 묻는다(막지는 않는다).
+        filing_names = {k: self._label_of(k) for k in FILING_KEYS}
+        # ① 이미 완료된 신고 칸을 다시 켰다 → 신고가 한 번 더 접수된다.
+        again = [f"{people[i].name_label} — {filing_names[k]}"
+                 for i, (_inp, keys) in enumerate(jobs) for k in keys
+                 if k in FILING_KEYS and (k, i) in self._cells and self._cells[(k, i)].status == "ok"]
+        if again and not messagebox.askyesno(
+                "이미 완료된 신고를 다시 실행합니다",
+                "아래 신고는 이미 완료됐습니다. 계속하면 신고가 한 번 더 접수됩니다.\n\n"
+                + "\n".join(f"· {a}" for a in again)
+                + "\n\n다시 신고할까요?\n(아니면 [아니요]를 누르고 해당 칸을 눌러 '완료'로 되돌리세요)",
+                icon="warning", default="no"):
+            return
+        # ② 신고가 '실패'인 채 꺼져 있는데 그 사람의 다른 단계는 켜져 있다 → 신고 없이 뒤 단계만 돈다.
+        #    (실패해도 체크가 풀리므로, 다시 켜는 걸 잊으면 예컨대 홈택스 신고 없이 위택스만 접수된다.)
+        skipped = [f"{people[i].name_label} — {filing_names[k]}"
+                   for i, (_inp, keys) in enumerate(jobs) if keys for k in FILING_KEYS
+                   if k not in keys and (k, i) in self._cells and self._cells[(k, i)].status == "fail"]
+        if skipped and not messagebox.askyesno(
+                "실패한 신고가 꺼져 있습니다",
+                "아래 신고는 실패한 상태인데 이번 실행에서 빠져 있습니다.\n"
+                "계속하면 이 신고 없이 나머지 단계만 진행합니다.\n\n"
+                + "\n".join(f"· {a}" for a in skipped)
+                + "\n\n그대로 진행할까요?\n(신고부터 다시 하려면 [아니요]를 누르고 그 칸을 눌러 '대기'로 만드세요)",
+                icon="warning", default="no"):
+            return
+
         self._stop = False
         for (k, i), cell in self._cells.items():
-            if self._cell_vars[(k, i)].get() and self._phase_vars[k].get():
+            if self._cell_vars[(k, i)].get():
                 cell.set_status("idle")     # 이번에 돌릴 칸만 초기화(완료 이력은 유지)
         self.log_text.delete("1.0", "end")
         self.status_var.set("실행 중…")
@@ -1244,8 +1292,20 @@ class App:
                 emit("done")
 
         self._ensure_session()
-        self._busy = True
+        self._set_busy(True)
         self._run_fut = asyncio.run_coroutine_threadsafe(main(), self.session_loop)
+
+    def _label_of(self, key: str) -> str:
+        return next((m.LABEL for m in ALL_PHASES if m.KEY == key), key)
+
+    def _set_busy(self, b: bool):
+        """실행 중에는 칸·단계 이름·[수정]을 잠근다. 이번 실행의 대상은 [시작]을 누른 순간
+        정해지므로, 도중에 눌러봐야 반영되지 않고 화면만 실제와 달라진다."""
+        self._busy = b
+        for cell in self._cells.values():
+            cell.set_locked(b)
+        if self._attach_fix_chk is not None:
+            self._attach_fix_chk.locked = b
 
     def _consume_napbu_skip(self) -> bool:
         """대기 루프가 호출 — [지금 출력]이 눌렸으면 True(한 번 쓰고 리셋)."""
@@ -1304,7 +1364,7 @@ class App:
                         self._napbu_box.pack_forget()
                         self.status_var.set("실행 중…")
                 elif kind == "done":
-                    self._busy = False
+                    self._set_busy(False)
                     self._finish_elapsed()
                     if evt.get("stopped") == "filing":
                         # 신고 실패로 멈춘 경우 '완료'로 덮으면 안 된다 — 멈춘 줄 모르고 넘어간다.
@@ -1361,8 +1421,8 @@ class App:
         self.log_text.see("end")
 
     def _set_phase(self, key: str, status: str, person: int | None = None):
-        """단계×신고인 셀 상태 갱신. 완료(ok)되면 체크를 자동으로 풀어
-        '시작'을 다시 눌렀을 때 실패·미완료분만 재시도되게 한다(재제출 방지)."""
+        """단계×신고인 칸 상태 갱신. 결과가 나오면(완료든 실패든) 체크를 풀어, 다음 [시작]은
+        사용자가 다시 켠 칸과 아직 돌지 않은 '대기' 칸만 돌린다."""
         targets = [person] if person is not None else \
                   [i for (k, i) in self._cells if k == key]
         for i in targets:
@@ -1370,7 +1430,7 @@ class App:
             if cell is None:
                 continue
             cell.set_status(status)
-            if status == "ok":
+            if status in ("ok", "fail"):
                 v = self._cell_vars.get((key, i))
                 if v is not None and v.get():
                     v.set(False)

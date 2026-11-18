@@ -15,6 +15,8 @@ from typing import Callable
 from playwright.async_api import async_playwright
 
 from . import browser as B
+from . import ersfile
+from . import filed
 from . import pdf_save
 from .phases import ALL_PHASES, PHASE_BY_KEY
 from .phases.base import Inputs, PhaseResult
@@ -278,10 +280,57 @@ class BrowserSession:
         self.output_mode = None
 
 
+def wetax_pick_for(inp: Inputs, wetax_filed: list) -> int | None:
+    """위택스 신고내역에서 이 신고건이 같은 이름 행 중 위에서 몇 번째인가(0부터).
+
+    위택스 목록엔 접수번호가 없고 최근 신고가 위에 온다. 그래서 '이번 실행에서 신고한 순서'로
+    센다: 내 신고 뒤에 같은 이름으로 신고된 건수만큼 아래로 밀려 있다.
+      · ⑤는 내 신고 직후에 돌므로 뒤에 신고된 게 없어 0(맨 위).
+      · 몰아서 하는 ⑦은 같은 이름으로 N건을 신고했고 내가 k번째면 N−k (맨 먼저 신고한 건이 가장 아래).
+    이번 실행에서 신고하지 않았으면 None — 호출측이 '행이 하나일 때만 진행'으로 처리한다.
+    """
+    pos = next((i for i, x in enumerate(wetax_filed) if x is inp), None)
+    if pos is None:
+        return None
+    # 납부기한(양도월)으로 줄을 먼저 추리므로, 순서는 '같은 이름·같은 양도월'끼리만 센다.
+    key = (inp.name_label, trade_ym_of(inp))
+    return sum(1 for x in wetax_filed[pos + 1:] if (x.name_label, trade_ym_of(x)) == key)
+
+
+def trade_ym_of(inp: Inputs) -> str:
+    """변환파일 이름의 양도연월 'YYYYMM'. 부동산 예정신고 파일일 때만(납부기한 계산이 그 경우만 맞다)."""
+    for path in (inp.wetax_convert_file, inp.hometax_convert_file):
+        if not path:
+            continue
+        fn = ersfile.parse_filename(path)
+        if fn.get("trade_ym") and "부동산" in (fn.get("asset") or ""):
+            return fn["trade_ym"]
+    return ""
+
+
+def _prepare_row_keys(mod, inp: Inputs, wetax_filed: list, log) -> None:
+    """단계 실행 직전 — '어느 신고건의 행인가'를 Inputs에 채운다(각 단계가 그 행만 고르도록)."""
+    if mod.KEY in ("hometax_attach", "hometax_docs", "hometax_napbu"):
+        if not inp.hometax_receipt_no and not inp.hometax_filed_now:
+            rc = filed.recall(inp.hometax_convert_file)
+            if rc:
+                inp.hometax_receipt_no = rc
+                log(f"[i] (홈택스) 신고 기록에서 접수번호 확인: {rc}")
+    elif mod.KEY in ("wetax_docs", "wetax_napbu"):
+        inp.wetax_pick = wetax_pick_for(inp, wetax_filed)
+        inp.wetax_trade_ym = trade_ym_of(inp)
+
+
 async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inputs,
-                     emit: Emit, stop_check: Callable[[], bool] | None = None
-                     ) -> list[PhaseResult]:
-    """세션 브라우저에서 선택 phase들을 실행. 끝나도 브라우저는 유지."""
+                     emit: Emit, stop_check: Callable[[], bool] | None = None,
+                     wetax_filed: list | None = None) -> list[PhaseResult]:
+    """세션 브라우저에서 선택 phase들을 실행. 끝나도 브라우저는 유지.
+
+    wetax_filed: 이번 실행(배치)에서 위택스 신고에 성공한 Inputs를 신고 순서대로 담는 목록.
+                 여러 신고인에 걸쳐 공유해야 하므로 run_batch가 넘겨준다.
+    """
+    if wetax_filed is None:
+        wetax_filed = []
     def log(msg: str):
         emit("log", text=msg)
 
@@ -319,6 +368,7 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
             break
         emit("phase", key=mod.KEY, status="run")
         log(f"[i] ===== {mod.LABEL} 시작 =====")
+        _prepare_row_keys(mod, inp, wetax_filed, log)
         try:
             res = await mod.run(ctx, inp, emit, stop_check=stop_check)
         except asyncio.CancelledError:
@@ -327,6 +377,16 @@ async def run_phases(session: BrowserSession, selected_keys: list[str], inp: Inp
             res = PhaseResult(mod.KEY, mod.LABEL, ok=False, reason=f"예외: {e}")
             log(f"[!] {mod.LABEL} 예외: {e}")
         results.append(res)
+        # 방금 신고한 건의 접수번호를 뒤 단계가 알아냈으면(접수증 화면에서 못 읽은 경우) 그것도 기록.
+        if inp.hometax_filed_now and inp.hometax_receipt_no:
+            filed.remember(inp.hometax_convert_file, inp.hometax_receipt_no)
+        # 신고에 성공하면 그 신고건을 가리킬 열쇠를 남긴다 — 뒤 단계가 이 행만 고른다.
+        if res.ok and mod.KEY == "hometax_filing" and inp.auto_submit:
+            inp.hometax_filed_now = True
+            inp.hometax_receipt_no = res.receipt_no or ""
+            filed.remember(inp.hometax_convert_file, res.receipt_no)
+        elif res.ok and mod.KEY == "wetax_filing" and inp.auto_submit:
+            wetax_filed.append(inp)
         emit("phase", key=mod.KEY, status="ok" if res.ok else "fail")
         tail = (f" / 접수 {res.receipt_no}" if res.receipt_no else "") + \
                (f" / {res.reason}" if res.reason else "")
@@ -390,9 +450,9 @@ async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
           (완료된 단계는 GUI가 빼고 넘겨 실패분만 재시도되게 함).
     ⑦ 위택스 납부서(가상계좌 대기)는 **전원 나머지 단계를 끝낸 뒤 마지막에 몰아서** 한다.
     앞사람 가상계좌가 뒷사람 처리 중에 이미 생성돼 대기 시간이 거의 사라진다.
-    ⚠ 누구든 **신고 단계(①②)가 실패하면 다음 신고인도, 몰아둔 ⑦도 진행하지 않는다.**
+    ⚠ 누구든 **신고 단계(①②)가 실패하면 그 사람의 남은 단계와 다음 신고인은 진행하지 않는다.**
       공동명의는 같은 자료로 만든 변환파일이라 같은 오류가 날 가능성이 크고, 고친 뒤
-      [시작]을 다시 누르면 남은 칸부터 이어진다.
+      [시작]을 다시 누르면 남은 칸부터 이어진다. 단 **앞서 신고가 끝난 사람들의 ⑦은 마저 뽑는다.**
     """
     def log(m: str):
         emit("log", text=m)
@@ -407,6 +467,8 @@ async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
 
     out: list = [[] for _ in jobs]
     stopped = False          # 신고 실패로 전체 중단했는가
+    stop_idx = len(jobs)     # 신고가 실패한 신고인 위치(그 앞사람들은 정상 완료)
+    wetax_filed: list = []   # 이번 실행에서 위택스 신고에 성공한 Inputs — 신고 순서대로
     for idx, (inp, keys) in enumerate(jobs):
         if stop_check and stop_check():
             log("[i] 중단됨.")
@@ -418,7 +480,8 @@ async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
         log(f"[i] ########## {who} ({idx + 1}/{len(jobs)}) ##########")
         emit("person", index=idx, status="run")
         try:
-            res = await run_phases(session, main_keys, inp, _person_emit(emit, idx), stop_check)
+            res = await run_phases(session, main_keys, inp, _person_emit(emit, idx), stop_check,
+                                   wetax_filed=wetax_filed)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -428,26 +491,34 @@ async def run_batch(session: BrowserSession, jobs: list[tuple], emit: Emit,
         ok = bool(res) and all(r.ok for r in res)
         emit("person", index=idx, status="ok" if ok else "fail")
         if filing_failed(res):
-            stopped = True
+            stopped, stop_idx = True, idx
             later = [j[0].name_label or f"{i + 1}번" for i, j in enumerate(jobs) if i > idx]
-            if later or defer_napbu:
-                log(f"[i] 진행하지 않은 신고인·단계: "
-                    f"{', '.join(later + (['위택스 납부서(전원)'] if defer_napbu else []))}")
+            if later:
+                log(f"[i] 진행하지 않은 신고인: {', '.join(later)}")
             break
 
-    # 미뤄둔 위택스 납부서 — 전원 몰아서
-    if defer_napbu and not stopped and not (stop_check and stop_check()):
+    # 미뤄둔 위택스 납부서 — 몰아서.
+    # ⚠ 신고 실패로 멈췄어도 **그 앞사람들의 ⑦은 마저 뽑는다.** 앞사람은 신고가 정상이라
+    #   뽑아도 위험이 없고, 지금 안 뽑으면 다음 실행에선 '이번에 신고하지 않은 건'이 되어
+    #   같은 이름 행이 여럿일 때 어느 행인지 알 수 없어 멈추게 된다(신고 순서 계산은 같은
+    #   실행 안에서만 성립). 실패한 사람과 그 뒤는 뽑지 않는다.
+    todo = [i for i, (_inp, keys) in enumerate(jobs) if last_key in keys and i < stop_idx]
+    if defer_napbu and todo and not (stop_check and stop_check()):
+        if stopped:
+            log("[i] 신고 오류로 멈췄지만, 앞서 신고가 끝난 신고인의 위택스 납부서는 마저 출력합니다 "
+                "(기다리지 않으려면 [중단]).")
         log("[i] ########## 위택스 납부서 (전원) ##########")
         for idx, (inp, keys) in enumerate(jobs):
             if stop_check and stop_check():
                 log("[i] 중단됨.")
                 break
-            if last_key not in keys:
+            if idx not in todo:
                 continue
             who = inp.name_label or f"{idx + 1}번"
             log(f"[i] ----- {who} 위택스 납부서 -----")
             try:
-                res = await run_phases(session, [last_key], inp, _person_emit(emit, idx), stop_check)
+                res = await run_phases(session, [last_key], inp, _person_emit(emit, idx), stop_check,
+                                       wetax_filed=wetax_filed)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001

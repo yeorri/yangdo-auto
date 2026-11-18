@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from . import pdf_save
+from . import rowpick as R
 from .browser import HOMETAX_URL
 
 # 접수번호 패턴 (예: 212-2026-2-505316384006)
@@ -483,32 +484,44 @@ async def query_attach(page, rrn: str, log=print) -> bool:
     return True
 
 
-async def attach_state(page) -> str:
-    """조회 결과의 부속서류 칸 상태 — 'submitted' | 'new' | ''(행을 못 찾음).
+async def attach_state(page, receipt_no: str) -> str:
+    """**receipt_no 줄의** 부속서류 칸 상태 — 'submitted' | 'new' | ''(줄·버튼을 못 찾음).
 
     두 버튼은 배타적이다: 아직 안 냈으면 [첨부하기], 이미 냈으면 그 자리에 [제출내역보기].
-    행이 그려지기 전에 한 번만 보면 둘 다 없어 오판하므로 폴링한다.
+    ⚠ 화면 전체에서 찾으면 안 된다 — 같은 사람의 다른 신고건이 이미 부속서류를 냈으면 그 줄의
+      [제출내역보기]를 보고 '이미 제출됨'으로 오판하고, [수정]이 켜져 있으면 **다른 건의
+      부속서류를 지운다**(2026-11-18 정미희 2번 건이 이 오판으로 실패).
     """
     for _ in range(20):                 # 최대 ~8초
-        try:
-            if await page.get_by_text("제출내역보기", exact=True).count() > 0:
-                return "submitted"
-            if await page.get_by_text("첨부하기", exact=True).count() > 0:
-                return "new"
-        except Exception:
-            pass
+        labels = await R.labels_of(page, receipt_no)
+        if "제출내역보기" in labels:
+            return "submitted"
+        if "첨부하기" in labels:
+            return "new"
         await page.wait_for_timeout(400)
     return ""
 
 
-async def query_and_open_attach(ctx, page, rrn: str, log=print):
-    """주민번호 조회 → 조회완료 알림 닫기 → '첨부하기'(새 팝업) → 팝업 page 반환(없으면 None)."""
+async def query_and_open_attach(ctx, page, rrn: str, log=print, receipt_no: str = ""):
+    """주민번호 조회 → 조회완료 알림 닫기 → **receipt_no 줄의** '첨부하기'(새 팝업) → 팝업 page(없으면 None)."""
     if not await query_attach(page, rrn, log):
         return None
+    if not receipt_no:
+        receipt_no = await R.resolve(page, "", False, log, screen="부속서류")
+        if not receipt_no:
+            return None
     try:
-        # '첨부하기'는 조회 결과 행이 그려진 뒤에 나타난다 — locator가 자동 대기(12초)
+        # '첨부하기'는 조회 결과 줄이 그려진 뒤에 나타난다 — 줄이 보일 때까지 기다린 뒤 표시한다
+        st = "norow"
+        for _ in range(30):             # 최대 ~12초
+            st = await R.mark(page, receipt_no, "첨부하기")
+            if st == "ok":
+                break
+            await page.wait_for_timeout(400)
+        if st != "ok":
+            raise RuntimeError(f"접수번호 {receipt_no} 줄의 [첨부하기]를 찾지 못함")
         async with ctx.expect_page(timeout=15000) as info:
-            await page.get_by_text("첨부하기", exact=True).first.click(timeout=12000)
+            await page.locator(R.PICK).first.click(timeout=12000)
         popup = await info.value
         # 고정 2초 대신 문서 로드까지 대기(느린 PC에서 내용이 늦게 뜨는 경우 대비).
         # 파일 입력칸 자체는 attach_files_and_submit이 다시 폴링한다.
@@ -596,15 +609,17 @@ async def _click_in_list_modal(page, text: str) -> bool:
     return bool(await _list_modal_js(page, "click", text))
 
 
-async def open_submitted_list(page, log=print) -> bool:
-    """[제출내역보기] → 제출목록 모달 열기. **조회는 이미 끝난 상태여야 한다**(query_attach).
+async def open_submitted_list(page, log=print, receipt_no: str = "") -> bool:
+    """**receipt_no 줄의** [제출내역보기] → 제출목록 모달 열기. 조회는 이미 끝난 상태여야 한다.
 
-    한 번도 제출한 적 없으면 그 자리에 [첨부하기]만 있다 → False(오류 아님, 지울 게 없음).
+    ⚠ 삭제로 이어지는 길이라 접수번호 없이는 열지 않는다(다른 신고건의 제출분을 지울 수 있다).
     """
     try:
-        await page.get_by_text("제출내역보기", exact=True).first.click(timeout=8000)
+        if not receipt_no or await R.mark(page, receipt_no, "제출내역보기") != "ok":
+            raise RuntimeError("대상 줄 없음")
+        await page.locator(R.PICK).first.click(timeout=8000)
     except Exception:
-        log("[i] (홈택스) [제출내역보기] 없음 — 기존 제출분이 없는 것으로 보고 진행")
+        log(f"[!] (홈택스) 접수번호 {receipt_no or '(미상)'} 줄의 [제출내역보기]를 열지 못함")
         return False
     for _ in range(25):                 # 모달 등장까지 최대 10초
         await page.wait_for_timeout(400)
@@ -612,6 +627,27 @@ async def open_submitted_list(page, log=print) -> bool:
             log("[v] (홈택스) 부속서류 제출목록 모달 열림")
             return True
     log("[!] (홈택스) 부속서류 제출목록 모달이 안 뜸")
+    return False
+
+
+async def submitted_list_is_for(page, receipt_no: str) -> bool:
+    """열려 있는 제출목록 모달이 receipt_no 신고건의 것인가 — 모달의 '신고서접수번호'로 확인.
+
+    삭제 직전 마지막 확인. 엉뚱한 신고건의 제출목록이 열렸다면 여기서 걸러 지우지 않는다.
+    """
+    for _ in range(10):                 # 내용이 채워질 때까지 최대 ~4초
+        for frame in page.frames:
+            try:
+                txt = await frame.evaluate(
+                    """(title) => [...document.querySelectorAll('.w2window')]
+                        .filter(w => { const r = w.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+                        .filter(w => (w.innerText || '').includes(title))
+                        .map(w => w.innerText || '').join(' ')""", SUBMITTED_LIST_TITLE)
+            except Exception:
+                continue
+            if receipt_no and receipt_no in (txt or ""):
+                return True
+        await page.wait_for_timeout(400)
     return False
 
 
@@ -1103,18 +1139,28 @@ async def query_inquiry(page, rrn: str, log=print) -> bool:
     return True
 
 
-async def open_receipt_docs(ctx, page, rrn: str, log=print) -> bool:
-    """주민번호 조회 → 접수번호 링크 클릭(접수증/신고서/공개여부 창들 오픈)."""
+async def open_receipt_docs(ctx, page, rrn: str, log=print,
+                            receipt_no: str = "", filed_now: bool = False) -> str:
+    """주민번호 조회 → **이 신고건의** 접수번호 링크 클릭(접수증/신고서/공개여부 창들 오픈).
+
+    반환: 사용한 접수번호('' = 실패). 같은 사람 신고건이 여러 줄일 수 있어 '첫 링크'를 누르지
+    않는다 — rowpick.resolve가 접수번호를 정하고, 못 정하면 멈춘다.
+    """
     if not await query_inquiry(page, rrn, log):
-        return False
+        return ""
+    rc = await R.resolve(page, receipt_no, filed_now, log)
+    if not rc:
+        return ""
     try:
-        await page.get_by_text(RECEIPT_NO_RE).first.click(timeout=6000)
+        if await R.mark(page, rc, "receipt") != "ok":
+            raise RuntimeError("접수번호 줄을 찾지 못함")
+        await page.locator(R.PICK).first.click(timeout=6000)
     except Exception as e:
         log(f"[!] (홈택스) 접수번호 링크 클릭 실패: {str(e)[:60]}")
-        return False
+        return ""
     await page.wait_for_timeout(4000)
-    log("[v] (홈택스) 접수번호 링크 클릭 — 접수증/신고서 창 열림")
-    return True
+    log(f"[v] (홈택스) 접수번호 {rc} 링크 클릭 — 접수증/신고서 창 열림")
+    return rc
 
 
 async def set_disclosure(ctx, disclose: bool = True, log=print) -> bool:
@@ -1494,8 +1540,8 @@ async def _click_text_in_frames(window, text: str) -> bool:
 
 
 async def print_napbu(ctx, page, pdf_dir, label: str = "", output_mode: str = "pdf",
-                      include_name: bool = False, log=print) -> dict:
-    """신고내역 모달의 납부서 [보기] → 납부서 목록 팝업 → 각 납부서(프린트 아이콘) PDF저장/출력.
+                      include_name: bool = False, log=print, receipt_no: str = "") -> dict:
+    """신고내역 모달에서 **receipt_no 줄의** 납부서 [보기] → 납부서 목록 팝업 → 각 납부서 PDF저장/출력.
 
     납부서는 분납 시 여러 건. img[alt='납부서'](btn_print.png) 클릭 → 납부서 clipreport 창.
     파일명: [납부서]{이름}_양도소득세_{납부기한}.pdf (납부기한은 목록 표에서 fetch).
@@ -1507,23 +1553,28 @@ async def print_napbu(ctx, page, pdf_dir, label: str = "", output_mode: str = "p
     result = {"saved": [], "failed": []}
 
     await page.bring_to_front()
-    # 신고내역 행엔 접수증 보기 + 납부서 보기. 차손이면 납부서 보기가 없어 보기 버튼이 1개뿐 →
-    # .last가 접수증 보기를 누르는 오작동 발생. 보기 버튼이 2개 이상일 때만 마지막(=납부서)을 누른다.
-    bogi = page.get_by_text("보기", exact=True)
-    vis = []
-    try:
-        for i in range(await bogi.count()):
-            if await bogi.nth(i).is_visible():
-                vis.append(i)
-    except Exception:
-        pass
-    if len(vis) < 2:
+    # 신고건 한 줄엔 [보기]가 둘(접수증·납부서). 차손이면 납부서 [보기]가 없어 하나뿐이다.
+    # ⚠ 예전엔 '화면 전체의 마지막 [보기]'를 눌렀다. 줄이 하나일 땐 그 줄의 납부서지만,
+    #   같은 사람 신고건이 둘이면 **맨 아래 줄(먼저 신고한 건)의 납부서**가 된다 — 2번 신고의
+    #   납부서로 1번 신고 것이 저장됐다(2026-11-18). → 접수번호 줄 안의 [보기]만 본다.
+    if not receipt_no:
+        receipt_no = await R.resolve(page, "", False, log)
+        if not receipt_no:
+            result["failed"].append("[신고건 특정 불가]")
+            return result
+    st = await R.mark(page, receipt_no, "napbu")
+    if st == "nobtn":
         log("[i] (홈택스) 납부서 보기 없음(차손/무납부서) — 건너뜀")
         return result
+    if st != "ok":
+        log(f"[!] (홈택스) 접수번호 {receipt_no} 줄을 찾지 못함 — 납부서 출력 중단")
+        result["failed"].append("[신고건 줄 없음]")
+        return result
     try:
-        await bogi.nth(vis[-1]).click(timeout=5000)
+        await page.locator(R.PICK).first.click(timeout=5000)
     except Exception as e:
         log(f"[!] (홈택스) 납부서 보기 클릭 실패: {str(e)[:60]}")
+        result["failed"].append("[납부서 보기]")
         return result
     await page.wait_for_timeout(2500)
 

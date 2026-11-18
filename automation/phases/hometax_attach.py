@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .. import browser as B
 from .. import hometax as H
+from .. import rowpick as R
 from .base import Inputs, PhaseResult
 
 KEY = "hometax_attach"
@@ -115,16 +116,33 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     if not await H.query_attach(page, inp.seller_rrn, log):
         res.reason = "조회 실패"
         return res
+    # 어느 신고건인가 — 같은 사람 신고건이 여러 줄일 수 있다. 접수번호를 정하지 못하면 멈춘다
+    # (다른 건에 첨부하거나, [수정]으로 다른 건의 부속서류를 지우는 것보다 멈추는 게 낫다).
+    rc = await R.resolve(page, inp.hometax_receipt_no, inp.hometax_filed_now, log, screen="부속서류")
+    if not rc:
+        res.reason = "어느 신고건인지 특정하지 못함 — 첨부하지 않음"
+        return res
+    inp.hometax_receipt_no = rc
     removed = 0
-    if await H.attach_state(page) == "submitted":
+    state = await H.attach_state(page, rc)
+    if state == "":
+        res.reason = f"접수번호 {rc} 줄에서 [첨부하기]·[제출내역보기]를 찾지 못함"
+        log(f"[!] (홈택스) {res.reason}")
+        return res
+    if state == "submitted":
         if not inp.replace_attachments:
             res.reason = "이미 부속서류가 제출된 건 — [수정]을 켜고 다시 실행하세요"
-            log(f"[!] (홈택스) {res.reason}")
+            log(f"[!] (홈택스) {res.reason} (접수번호 {rc})")
             log("[i] (홈택스) 기존 제출분을 임의로 지우지 않았습니다.")
             return res
-        log("[i] (홈택스) 이미 제출된 건 — 기존 제출분을 지우고 다시 제출합니다(수정)")
-        if not await H.open_submitted_list(page, log):
+        log(f"[i] (홈택스) 이미 제출된 건(접수번호 {rc}) — 기존 제출분을 지우고 다시 제출합니다(수정)")
+        if not await H.open_submitted_list(page, log, receipt_no=rc):
             res.reason = "제출내역 열기 실패 — 재제출하지 않음"
+            return res
+        # 지우기 직전 한 번 더 — 열린 제출목록이 정말 이 접수번호 것인지 모달의 '신고서접수번호'로 확인
+        if not await H.submitted_list_is_for(page, rc):
+            res.reason = f"열린 제출목록이 접수번호 {rc} 것인지 확인하지 못함 — 삭제하지 않음"
+            log(f"[!] (홈택스) {res.reason}")
             return res
         removed = await H.delete_submitted_attachments(page, log)
         if removed < 0:
@@ -139,7 +157,7 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
             res.reason = "삭제 후 부속서류 화면 재진입 실패"
             return res
 
-    popup = await H.query_and_open_attach(ctx, page, inp.seller_rrn, log)
+    popup = await H.query_and_open_attach(ctx, page, inp.seller_rrn, log, receipt_no=rc)
     if popup is None:
         res.reason = "조회/첨부 팝업 열기 실패"
         return res

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 
 from . import pdf_save
+from . import wetaxrow
 
 WETAX_FILING_URL = "https://www.wetax.go.kr/etr/lit/b0703/B070301M10.do"
 WETAX_INQUIRY_URL = "https://www.wetax.go.kr/etr/lit/b0703/B070302M01.do"
@@ -186,31 +187,6 @@ async def open_inquiry(page, log=print) -> bool:
     return True
 
 
-async def _expand_taxpayer(page, name: str, log=print) -> bool:
-    """신고내역 목록에서 name 행의 '출력물 보기' 클릭 → 신고서/납부서 링크 펼침.
-
-    신고내역 표가 늦게 렌더될 수 있어 등장할 때까지 폴링(1회 시도는 놓치는 원인).
-    """
-    clicked = False
-    for _ in range(25):          # 최대 ~10초
-        clicked = await page.evaluate("""(name) => {
-            const anchors=[...document.querySelectorAll('a')].filter(a=>
-                (a.id||'').startsWith('ui-id')||(a.title||'').includes('출력')||(a.textContent||'').includes('출력물'));
-            for(const a of anchors){
-                const row=a.closest('tr')||a.closest('li')||(a.parentElement&&a.parentElement.parentElement);
-                if(row && (row.innerText||'').includes(name)){ a.click(); return true; }
-            }
-            return false;
-        }""", name)
-        if clicked:
-            break
-        await page.wait_for_timeout(400)
-    await page.wait_for_timeout(1500)
-    if not clicked:
-        log(f"[!] (위택스) '{name}' 출력물 보기 못 찾음")
-    return clicked
-
-
 async def _click_text_js(scope, text: str) -> bool:
     return await scope.evaluate("""(text) => {
         for(const e of document.querySelectorAll('input,button,a,img')){
@@ -339,31 +315,28 @@ async def _oz_print(oz, target, log=print, save: bool = True) -> bool:
     return ok
 
 
-async def _fetch_due(page, name: str, log=print) -> str:
-    """'출력물 보기' 앵커의 개별 데이터 행(closest tr)에서 납부기한 추출.
-
-    (전체 tr 순회는 테이블 래퍼 tr이 먼저 잡혀 다른 행 날짜를 가져오는 버그가 있어 앵커 기준으로.)
-    개별 행은 [신고일자, 납부기한]뿐이라 마지막 날짜 = 납부기한.
-    """
-    due_raw = await page.evaluate("""(name) => {
-        const anchors=[...document.querySelectorAll('a')].filter(a=>
-            (a.id||'').startsWith('ui-id')||(a.title||'').includes('출력')||(a.textContent||'').includes('출력물'));
-        for(const a of anchors){
-            const row=a.closest('tr');
-            if(row && (row.innerText||'').includes(name)){
-                const ds=(row.innerText.match(/20\\d\\d-\\d\\d-\\d\\d/g))||[];
-                if(ds.length) return ds[ds.length-1];
-            }
-        }
-        return '';
-    }""", name)
-    log(f"[i] (위택스) {name} 납부기한 fetch: {due_raw}")
-    return pdf_save.fmt_due(due_raw)
+# 펼친 줄의 출력 링크 찾기/누르기. 링크는 '출력물 보기'를 누른 뒤에야 생기고(누르기 전 0개 —
+# 라이브 확인), 그 줄의 링크 묶음은 data-tooltip-content가 가리키는 요소 안에 들어간다.
+# 그 안에 있으면 그것만 쓰고, 구조가 달라 못 찾으면 문서 전체에서 찾는다(신고내역을 새로 연 뒤
+# 한 줄만 펼쳤으므로 그때도 그 줄의 링크뿐이다).
+_REPORT_LINK_JS = """(arg) => {
+    let scope = null;
+    try { scope = arg.tip ? document.querySelector(arg.tip) : null; } catch (e) { scope = null; }
+    const find = root => [...root.querySelectorAll('a')].find(a => {
+        const oc = a.getAttribute('onclick') || '';
+        return oc.includes('openReport') && (oc.includes("'Y'") === arg.hasY); });
+    const a = (scope && find(scope)) || find(document);
+    if (!a) return false;
+    if (arg.click) a.click();
+    return true;
+}"""
 
 
 async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode: str,
-                         include_name: bool, log=print) -> dict:
-    """신고내역 → name 출력물 보기 → kinds(신고서/납부서) OZ PDF저장/출력. {saved, failed}.
+                         include_name: bool, log=print, pick=None, trade_ym: str = "") -> dict:
+    """신고내역 → **이 신고건의 줄** 출력물 보기 → kinds(신고서/납부서) OZ PDF저장/출력. {saved, failed}.
+
+    pick·trade_ym: 같은 이름 신고건이 여러 줄일 때 어느 줄인지(wetaxrow.choose 참고).
 
     파일명: [신고서]{이름}_지방세 / [납부서]{이름}_지방세_{납부기한}.
     """
@@ -374,10 +347,12 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
 
     if not await open_inquiry(page, log):
         return result
-    due = await _fetch_due(page, name, log) if "납부서" in kinds else ""
-    if not await _expand_taxpayer(page, name, log):
-        result["failed"].append("출력물보기")
+    row = await wetaxrow.pick_and_expand(page, name, pick, trade_ym, log)
+    if row is None:
+        result["failed"].append("신고건 특정 불가")
         return result
+    due = pdf_save.fmt_due(row.get("due", "")) if "납부서" in kinds else ""
+    tip = row.get("tip", "")
 
     specs = []
     if "신고서" in kinds:
@@ -389,13 +364,7 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
         # 출력물 링크가 펼쳐지는 데 시간이 걸릴 수 있어 잠시 폴링(없으면 진짜 없는 것 = 차손 등)
         exists = False
         for _ in range(10):      # 최대 ~4초
-            exists = await page.evaluate("""(hasY) => {
-                for(const a of document.querySelectorAll('a')){
-                    const oc=a.getAttribute('onclick')||'';
-                    if(oc.includes('openReport')){ if(oc.includes("'Y'")===hasY) return true; }
-                }
-                return false;
-            }""", has_y)
+            exists = await page.evaluate(_REPORT_LINK_JS, {"tip": tip, "hasY": has_y, "click": False})
             if exists:
                 break
             await page.wait_for_timeout(400)
@@ -404,12 +373,7 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
             continue
         try:
             async with ctx.expect_page(timeout=10000) as info:
-                await page.evaluate("""(hasY) => {
-                    for(const a of document.querySelectorAll('a')){
-                        const oc=a.getAttribute('onclick')||'';
-                        if(oc.includes('openReport')){ if(oc.includes("'Y'")===hasY){ a.click(); return; } }
-                    }
-                }""", has_y)
+                await page.evaluate(_REPORT_LINK_JS, {"tip": tip, "hasY": has_y, "click": True})
             oz = await info.value
             # 뷰어 문서가 로드될 때까지 대기(느린 PC 대비). 버튼 등장은 _oz_print가 폴링.
             try:
@@ -435,12 +399,14 @@ async def _print_reports(ctx, page, pdf_dir, name: str, kinds: list, output_mode
 
 
 async def print_singo(ctx, page, pdf_dir, name: str, output_mode: str = "pdf",
-                      include_name: bool = False, log=print) -> dict:
+                      include_name: bool = False, log=print, pick=None, trade_ym: str = "") -> dict:
     """위택스 지방세 신고서만 출력(가상계좌 무관)."""
-    return await _print_reports(ctx, page, pdf_dir, name, ["신고서"], output_mode, include_name, log)
+    return await _print_reports(ctx, page, pdf_dir, name, ["신고서"], output_mode, include_name, log,
+                                pick=pick, trade_ym=trade_ym)
 
 
 async def print_napbu(ctx, page, pdf_dir, name: str, output_mode: str = "pdf",
-                      include_name: bool = False, log=print) -> dict:
+                      include_name: bool = False, log=print, pick=None, trade_ym: str = "") -> dict:
     """위택스 지방세 납부서(가상계좌)만 출력. 가상계좌 미생성/차손이면 링크 없어 건너뜀."""
-    return await _print_reports(ctx, page, pdf_dir, name, ["납부서"], output_mode, include_name, log)
+    return await _print_reports(ctx, page, pdf_dir, name, ["납부서"], output_mode, include_name, log,
+                                pick=pick, trade_ym=trade_ym)

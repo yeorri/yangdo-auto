@@ -92,6 +92,7 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
 
     summary = await W.print_napbu(
         ctx, page, out_dir, inp.name_label, output_mode=inp.output_mode,
+        pick=inp.wetax_pick, trade_ym=inp.wetax_trade_ym,
         include_name=inp.include_name, log=log,
     )
     res.outputs = summary.get("saved", [])

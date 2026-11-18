@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import browser as B
 from .. import hometax as H
+from .. import rowpick as R
 from .base import Inputs, PhaseResult
 
 KEY = "hometax_filing"
@@ -78,4 +79,21 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
     ok = await H.submit_filing(page, log)
     res.ok = ok
     res.reason = (res.reason or "") + ("제출 완료" if ok else "제출 실패")
+    if ok:
+        # 접수번호를 남긴다 — 뒤 단계(부속서류·접수증·납부서)가 '이 신고건의 줄'만 고르는 열쇠.
+        # 같은 사람 신고건이 조회 화면에 여러 줄 뜰 수 있어 위치로는 고를 수 없다.
+        rc = await R.read_from_modals(page)
+        if not rc:
+            # 접수증 화면에서 못 읽었으면 지금 바로 신고내역에서 '접수일시가 가장 늦은 줄'을 본다.
+            # 방금 신고했으니 지금 이 순간엔 그 줄이 확실히 이번 건이다(나중엔 장담 못 한다).
+            try:
+                if await H.navigate_to_inquiry(page, log) and await H.query_inquiry(page, inp.seller_rrn, log):
+                    rc = await R.resolve(page, "", True, log)
+            except Exception as e:  # noqa: BLE001
+                log(f"[i] (홈택스) 접수번호 확인 중 예외(계속): {str(e)[:60]}")
+        if rc:
+            res.receipt_no = rc
+            log(f"[i] (홈택스) 접수번호 {rc}")
+        else:
+            log("[i] (홈택스) 접수번호를 확인하지 못함 — 뒤 단계는 신고건이 한 줄일 때만 진행합니다")
     return res

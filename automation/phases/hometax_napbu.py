@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .. import browser as B
 from .. import hometax as H
+from .. import rowpick as R
 from .base import Inputs, PhaseResult
 
 KEY = "hometax_napbu"
@@ -41,9 +42,16 @@ async def run(ctx, inp: Inputs, emit, stop_check=None) -> PhaseResult:
         res.reason = "주민번호 조회 실패"
         return res
 
+    # 어느 신고건의 납부서인가 — 접수번호 줄을 정하지 못하면 멈춘다(다른 건의 납부서를 저장하지 않게).
+    rc = await R.resolve(page, inp.hometax_receipt_no, inp.hometax_filed_now, log)
+    if not rc:
+        res.reason = "어느 신고건인지 특정하지 못함 — 납부서를 출력하지 않음"
+        return res
+    inp.hometax_receipt_no = rc
+    res.receipt_no = rc
     summary = await H.print_napbu(
         ctx, page, out_dir, label=inp.name_label, output_mode=inp.output_mode,
-        include_name=inp.include_name, log=log,
+        include_name=inp.include_name, log=log, receipt_no=rc,
     )
     res.outputs = summary.get("saved", [])
     failed = summary.get("failed", [])
